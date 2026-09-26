@@ -6,8 +6,8 @@ from pathlib import Path
 import lightgbm as lgb
 import pandas as pd
 
-from ber.predict import META, ownership_report, sweep_threshold
-from ber.split import load_val_ids
+from predict import META, ownership_report, sweep_threshold
+from valsplit import GT_PATH, load_val_ids
 
 FORBIDDEN = {"country"}  # France is unseen: no feature may encode country
 
@@ -106,14 +106,13 @@ def refit_full(df: pd.DataFrame, bundle_path: str = "artifacts/bundle.json", out
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", required=True, help="parquet: s1_id, cand_id, feature columns (from features.py)")
-    ap.add_argument("--gt", default="student_resource/dataset/train/train_ground_truth.tsv")
-    ap.add_argument("--val-ids", default="splits/val_s1_ids.txt.gz")
+    ap.add_argument("--gt", default=str(GT_PATH))
     ap.add_argument("--out-dir", default="artifacts")
     ap.add_argument("--fit-s1-frac", type=float, default=1.0)
     ap.add_argument("--refit-full", action="store_true", help="after training, refit on all labelled S1s with the best iteration")
     a = ap.parse_args()
     feats = pd.read_parquet(a.features)
     df = attach_labels(feats, a.gt)
-    train(df, load_val_ids(a.val_ids), a.gt, a.out_dir, a.fit_s1_frac)
+    train(df, load_val_ids(), a.gt, a.out_dir, a.fit_s1_frac)
     if a.refit_full:
         refit_full(df, f"{a.out_dir}/bundle.json", a.out_dir)
