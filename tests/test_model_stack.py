@@ -47,3 +47,19 @@ except ValueError: pass
 res = train(df, set(s1[:60]), gt, out_dir=tempfile.mkdtemp())
 assert res["macro_f05"] > 0.6, res["macro_f05"]
 print("ALL OK")
+
+# streaming ownership == in-memory ownership; refit; grid endpoints
+from ber.predict import reduce_owners_streaming
+from ber.train import refit_full
+parts = [sc.iloc[i::4] for i in range(4)]
+w = reduce_owners_streaming(parts)
+full = assign_owners(sc, 0.0)
+assert set(zip(w.s1_id, w.cand_id)) == set(zip(full.s1_id, full.cand_id))
+r = sweep_threshold(sc, sizes)
+assert 0.0 in r["curve"] and 1.01 in r["curve"]
+od = tempfile.mkdtemp()
+res = train(df, set(s1[:60]), gt, out_dir=od)
+assert "ownership" in res and 0 <= res["all_empty_baseline"] <= 1
+refit_full(df, f"{od}/bundle.json", od)
+import os; assert os.path.exists(f"{od}/lgbm_full.txt")
+print("ALL OK 2")

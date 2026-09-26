@@ -51,11 +51,47 @@ def macro_f05_scored(scored: pd.DataFrame, gold_sizes: pd.Series, t: float, owne
 
 
 def sweep_threshold(scored: pd.DataFrame, gold_sizes: pd.Series, grid=None) -> Dict[str, float]:
-    """Pick the threshold maximising macro F0.5 after ownership; returns best t, best score and the full curve."""
-    grid = np.round(np.arange(0.30, 0.96, 0.02), 2) if grid is None else grid
-    curve = {float(t): macro_f05_scored(scored, gold_sizes, float(t)) for t in grid}
+    """Pick t maximising macro F0.5 after ownership.
+
+    Coarse pass: 0.10-0.95 step 0.05 plus the all (t=0) and none (t=1.01) endpoints; then a 0.01-step
+    refinement within +-0.05 of the coarse best. Returns best t, best score and the full curve.
+    """
+    if grid is None:
+        coarse = [0.0] + [round(x, 2) for x in np.arange(0.10, 0.951, 0.05)] + [1.01]
+        curve = {t: macro_f05_scored(scored, gold_sizes, t) for t in coarse}
+        b = max(curve, key=curve.get)
+        for t in np.round(np.arange(max(b - 0.05, 0.0), min(b + 0.05, 1.0) + 1e-9, 0.01), 2):
+            curve.setdefault(float(t), macro_f05_scored(scored, gold_sizes, float(t)))
+    else:
+        curve = {float(t): macro_f05_scored(scored, gold_sizes, float(t)) for t in grid}
     best = max(curve, key=curve.get)
     return {"t": best, "macro_f05": curve[best], "curve": curve}
+
+
+def reduce_owners_streaming(batches: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    """Global target ownership over scored batches without holding every pair in memory.
+
+    Keeps only the running best (p, then smallest s1_id) per cand_id, so peak memory is one row per
+    distinct target plus one batch. Threshold afterwards with `winners[winners.p >= t]`; that is
+    equivalent to thresholding first because t is global.
+    """
+    winners = None
+    for b in batches:
+        cur = b[["s1_id", "cand_id", "p"]]
+        if winners is not None:
+            cur = pd.concat([winners, cur], ignore_index=True)
+        cur = cur.sort_values(["cand_id", "p", "s1_id"], ascending=[True, False, True], kind="mergesort")
+        winners = cur.drop_duplicates("cand_id", keep="first")
+    return winners if winners is not None else pd.DataFrame(columns=["s1_id", "cand_id", "p"])
+
+
+def ownership_report(scored: pd.DataFrame, gold_sizes: pd.Series, t: float) -> Dict[str, float]:
+    """Constrained vs unconstrained macro F0.5 and the share of above-threshold targets claimed by 2+ S1s."""
+    above = scored[scored["p"] >= t]
+    coll = float((above.groupby("cand_id")["s1_id"].nunique() > 1).mean()) if len(above) else 0.0
+    return {"with_ownership": macro_f05_scored(scored, gold_sizes, t, True),
+            "without_ownership": macro_f05_scored(scored, gold_sizes, t, False),
+            "collision_rate": coll}
 
 
 def write_matches(lists: Dict[str, Set[str]], path: str, header: str = "source1_entity_id\tmatched_entity_ids") -> None:
@@ -71,7 +107,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Score a feature table with a trained model and apply the threshold + ownership policy.")
     ap.add_argument("--features", required=True, help="parquet with s1_id, cand_id and feature columns")
-    ap.add_argument("--model", default="artifacts/lgbm.txt")
+    ap.add_argument("--model", default="artifacts/lgbm.txt", help="use artifacts/lgbm_full.txt for the final refit")
     ap.add_argument("--threshold", type=float, default=None, help="defaults to artifacts/threshold.json")
     ap.add_argument("--s1-ids", required=True, help="text file: every S1 id to output, one per line")
     ap.add_argument("--out", default="output/matching_results.tsv")
@@ -79,7 +115,8 @@ if __name__ == "__main__":
     t = a.threshold if a.threshold is not None else json.load(open("artifacts/threshold.json"))["t"]
     booster = lgb.Booster(model_file=a.model)
     df = pd.read_parquet(a.features)
-    df["p"] = booster.predict(df[booster.feature_name()])
+    feats = json.load(open("artifacts/bundle.json"))["features"]
+    df["p"] = booster.predict(df[feats])
     with open(a.s1_ids) as f:
         ids = [l.strip() for l in f if l.strip()]
     write_matches(to_lists(assign_owners(df, t), ids), a.out)
