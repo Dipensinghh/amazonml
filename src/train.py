@@ -5,6 +5,9 @@ from pathlib import Path
 
 import lightgbm as lgb
 import pandas as pd
+import pyarrow as pa
+
+from features import feature_columns as b_feature_columns
 
 from predict import META, ownership_report, sweep_threshold
 from valsplit import GT_PATH, load_val_ids
@@ -39,12 +42,16 @@ def attach_labels(feats: pd.DataFrame, gt_path: str) -> pd.DataFrame:
 
 
 def feature_columns(df: pd.DataFrame) -> list:
-    """All non-meta columns; refuses country-like features."""
-    cols = [c for c in df.columns if c not in META]
-    bad = FORBIDDEN & set(cols)
+    """Model-input columns: B's contract (features.feature_columns) minus this stage's own columns (y, p, source).
+
+    B's list excludes keys, label and provenance by name, which is what protects against training on the
+    answer; a dtype filter would keep the int8 label. Country-like columns are refused outright.
+    """
+    bad = FORBIDDEN & set(df.columns)
     if bad:
         raise ValueError(f"forbidden feature columns: {bad}")
-    return cols
+    cols = b_feature_columns(pa.Table.from_pandas(df.iloc[:0], preserve_index=False))
+    return [c for c in cols if c not in META]
 
 
 PARAMS = dict(objective="binary", n_estimators=800, learning_rate=0.05, num_leaves=31,
