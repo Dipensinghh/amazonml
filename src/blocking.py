@@ -53,7 +53,10 @@ W_ADDR, W_NAME = 1.0, 0.5      # token weights
 ALPHAS = (0.0, 3.0, 6.0)       # rerank: score + alpha * name_sim/100
 TEST_S1 = 1_732_544            # rows in dataset/test/test_source1.tsv
 TARGET_RECALL = 0.93
-COLS = ["entity_id", "country", "name_core", "name_phon", "addr_norm", "addr_phon"]
+COLS = ["entity_id", "country", "name_core", "name_phon", "addr_norm", "addr_phon",
+        "name_non_latin", "addr_non_latin"]
+KN = 2                         # quota per source from the non-Latin phonetic index
+USE_NL_INDEX = False           # set by --nl-index (experimental; frozen config has it off)
 ADDR_COL, NAME_COL = "addr_norm", "name_core"   # token source columns (overridable via CLI)
 
 
@@ -166,12 +169,13 @@ class TokenIndex:
     is weighted by IDF x (1.0 address / 0.5 name), so dropped tokens never touch postings.
     """
 
-    def __init__(self, t: pd.DataFrame, pool):
+    def __init__(self, t: pd.DataFrame, pool, cols: tuple = (ADDR_COL, NAME_COL)):
         self.n = len(t)
-        self.common_a = common_words(t[ADDR_COL])
-        self.common_n = common_words(t[NAME_COL])
-        x = (hash_texts(t[ADDR_COL].tolist(), "addr", self.common_a, pool)
-             + hash_texts(t[NAME_COL].tolist(), "name", self.common_n, pool))
+        self.acol, self.ncol = cols
+        self.common_a = common_words(t[self.acol])
+        self.common_n = common_words(t[self.ncol])
+        x = (hash_texts(t[self.acol].tolist(), "addr", self.common_a, pool)
+             + hash_texts(t[self.ncol].tolist(), "name", self.common_n, pool))
         x.data[:] = 1.0                                        # binary even on hash collisions
         self.df = np.bincount(x.indices, minlength=N_FEATURES)
         self.tt = x.T.tocsr()                                  # tokens x docs
@@ -179,8 +183,8 @@ class TokenIndex:
 
     def queries(self, q: pd.DataFrame, pool) -> tuple[sp.csr_matrix, sp.csr_matrix]:
         """Binary hashed (address, name) query matrices using the target-side common words."""
-        return (hash_texts(q[ADDR_COL].tolist(), "addr", self.common_a, pool),
-                hash_texts(q[NAME_COL].tolist(), "name", self.common_n, pool))
+        return (hash_texts(q[self.acol].tolist(), "addr", self.common_a, pool),
+                hash_texts(q[self.ncol].tolist(), "name", self.common_n, pool))
 
     def for_cap(self, cap: int) -> np.ndarray:
         """Per-column IDF, zero for tokens absent from targets or with df > cap."""
@@ -226,13 +230,20 @@ def name_sim(q: pd.DataFrame, t: pd.DataFrame, qi: np.ndarray, ti: np.ndarray) -
 def topk_by(res: pd.DataFrame, key: np.ndarray, k: int) -> np.ndarray:
     """Boolean mask of rows among the top-k per (q_row, src) when ordered by `key` desc."""
     order = np.lexsort((-key, res["src"].to_numpy(), res["q_row"].to_numpy()))
-    grp = res["q_row"].to_numpy()[order].astype(np.int64) * 4 + res["src"].to_numpy()[order]
+    grp = res["q_row"].to_numpy()[order].astype(np.int64) * 8 + res["src"].to_numpy()[order]
     start = np.r_[0, np.flatnonzero(np.diff(grp)) + 1]
     pos = np.arange(len(order)) - np.repeat(start, np.diff(np.r_[start, len(order)]))
-    # groups src 0/1 = main S2/S3 index (quota k); src 2/3 = blank-address S2/S3 (quota KB)
-    quota = np.where(res["src"].to_numpy()[order] >= 2, min(KB, k), k)
+    # groups: src 0/1 = main S2/S3 index (quota k); 2/3 = blank-address index (quota KB);
+    # 4/5 = non-Latin phonetic index (quota KN)
+    s = res["src"].to_numpy()[order]
+    quota = np.select([s >= 4, s >= 2], [min(KN, k), min(KB, k)], k)
     mask = np.zeros(len(res), dtype=bool)
     mask[order[pos < quota]] = True
+    # the phonetic index can re-find a target already selected from the main index: keep one
+    sel = np.flatnonzero(mask)
+    dup = pd.DataFrame({"q": res["q_row"].to_numpy()[sel], "c": res["cand_id"].to_numpy()[sel],
+                        "key": key[sel]}).sort_values("key", ascending=False).duplicated(["q", "c"])
+    mask[sel[dup.sort_index().to_numpy()]] = False
     return mask
 
 
@@ -274,11 +285,16 @@ def build_pools(q_all: pd.DataFrame, split: str, caps: list, jpool, clock: dict,
             q = q_all.iloc[q_idx].reset_index(drop=True)
             tc = tgt[tgt["country"].to_numpy() == country]
             blank = (tc["addr_norm"] == "").to_numpy()
-            for sub, t in ((0, tc[~blank].reset_index(drop=True)), (2, tc[blank].reset_index(drop=True))):
+            subsets = [(0, tc[~blank]), (2, tc[blank])]
+            if USE_NL_INDEX:  # rows whose original name/address was non-Latin, phonetic tokens
+                nl = (tc["name_non_latin"] | tc["addr_non_latin"]).to_numpy()
+                subsets.append((4, tc[nl]))
+            for sub, t in subsets:
+                t = t.reset_index(drop=True)
                 if len(t) == 0:
                     continue
                 t0 = time.perf_counter()
-                idx = TokenIndex(t, jpool)
+                idx = TokenIndex(t, jpool, ("addr_phon", "name_phon") if sub == 4 else (ADDR_COL, NAME_COL))
                 clock["fixed"] += time.perf_counter() - t0
                 t0 = time.perf_counter()
                 qa, qn = idx.queries(q, jpool)
@@ -286,7 +302,7 @@ def build_pools(q_all: pd.DataFrame, split: str, caps: list, jpool, clock: dict,
                 for cap in caps:
                     t0 = time.perf_counter()
                     r = search(weight_queries(qa, qn, idx.for_cap(cap)), idx.tt,
-                               POOL if sub == 0 else KB * 3)
+                               POOL if sub == 0 else 3 * (KB if sub == 2 else KN))
                     r["name_sim"] = name_sim(q, t, r["q_row"].to_numpy(), r["t_row"].to_numpy())
                     part = pd.DataFrame({
                         "q_row": q_idx[r["q_row"].to_numpy()], "src": np.int8(src_code + sub),
@@ -300,7 +316,7 @@ def build_pools(q_all: pd.DataFrame, split: str, caps: list, jpool, clock: dict,
                     dt = time.perf_counter() - t0 + t_qx
                     clock.setdefault(cap, 0.0)
                     clock[cap] += dt
-                    print(f"  {country}/{src}{'/blank' if sub else ''} cap={cap:<5} q={len(q):,} t={len(t):,} "
+                    print(f"  {country}/{src}{['', '', '/blank', '', '/nonlatin'][sub]} cap={cap:<5} q={len(q):,} t={len(t):,} "
                           f"query+sim {dt:6.1f}s ({len(q) / dt:,.0f} q/s)  pairs {len(part):,}  "
                           f"fixed so far {clock['fixed']:.0f}s  peak {peak_ram_gb():.1f} GB", flush=True)
                 del idx, qa, qn
@@ -389,7 +405,10 @@ def main() -> None:
     ap.add_argument("--produce", choices=["test", "val50k", "fit200k"],
                     help="write artifacts/cand_<name>.parquet with the frozen config and exit")
     ap.add_argument("--from-pool", help="with --produce val50k: derive from a saved eval pool parquet")
+    ap.add_argument("--nl-index", action="store_true",
+                    help="add the non-Latin phonetic index (quota KN per source)")
     args = ap.parse_args()
+    globals()["USE_NL_INDEX"] = args.nl_index
     utf8_stdout()
     if args.produce == "val50k" and args.from_pool:
         select_from_pool(args.from_pool)
@@ -440,8 +459,8 @@ def main() -> None:
 
     print(f"\npool recall (all {POOL} per source, i.e. max achievable by reranking):")
     for cap in args.caps:
-        res = pools[cap]
-        print(f"  cap {cap}: {res['is_gt'].sum() / len(gt):.4f} @ {len(res) / len(q_all):.1f} cands/S1")
+        u = pools[cap].drop_duplicates(["q_row", "cand_id"])
+        print(f"  cap {cap}: {u['is_gt'].sum() / len(gt):.4f} @ {len(u) / len(q_all):.1f} cands/S1")
 
     scale = TEST_S1 / len(q_all)
     print(f"\nTiming: target-side fixed {t_fixed:.0f}s (all caps); per cap query+sim on sample and "

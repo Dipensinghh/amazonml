@@ -122,5 +122,20 @@ Candidate files (schema: s1_id, cand_id, source, blank_addr_index, tok_score, na
   (France 22.68, India 23.53, US 23.76); 1 S1 with no candidates; no duplicates.
   **Actual runtime 471 s (7.9 min)**, peak RAM 7.4 GB — France handled with no country-specific code.
 
-Open: India lags (0.881). Next idea: phonetic tokens only for non-Latin target rows (separate
-small index) queried with S1 phonetic tokens, unioned into the pool.
+### Experiment: non-Latin phonetic index (`--nl-index`, off in the frozen config)
+
+Separate index per country × source over target rows whose original name or address was
+non-Latin, tokenized from addr_phon/name_phon, queried with S1 phonetic tokens; quota KN = 2
+per source, deduped against the main pool. India targets flagged: S2 836k / S3 686k (~40%,
+mixed-script addresses count), so the index is not small.
+
+| config (cap 200, α 6, K 10) | India | overall | test time |
+|---|---|---|---|
+| frozen | 0.8806 @ 23.5 | 0.9293 @ 23.7 | ~12 min est. / 7.9 min actual |
+| + nl-index | 0.8836 @ 24.8 | 0.9305 @ 24.2 | ~18 min est. |
+
++0.3 pp India / +0.1 pp overall for +0.5 cands/S1 — marginal; not adopted yet.
+Also noted: K=5, α 6 with nl-index gives 0.9106 @ 14.4 cands/S1 (≥ 0.91 with ~40% fewer
+candidates) — an option if candidate-set size weighs heavily in judging.
+(This run overwrote `artifacts/val_blocking_pool_cap200.parquet`; `cand_val50k.parquet` was
+built from the frozen-config pool before it.)
