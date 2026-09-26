@@ -2,9 +2,9 @@
 import sys, tempfile
 sys.path.insert(0, "src")
 import numpy as np, pandas as pd
-from ber.evaluate import _toy_asserts, macro_f05
-from ber.predict import assign_owners, macro_f05_scored, sweep_threshold, to_lists
-from ber.train import feature_columns, train
+from evaluate import _toy_asserts, macro_f05
+from predict import assign_owners, macro_f05_scored, sweep_threshold, to_lists
+from train import feature_columns, train
 
 _toy_asserts()
 
@@ -38,7 +38,7 @@ gt = tempfile.mktemp(suffix=".tsv")
 with open(gt, "w") as f:
     f.write("source1_entity_id\tmatched_entity_ids\n")
     for s in s1: f.write(f"{s}\t{','.join(sorted(gold[s]))}\n")
-from ber.train import attach_labels
+from train import attach_labels
 df = attach_labels(feats, gt)
 assert df["y"].sum() == sc["y"].sum()
 try:
@@ -49,8 +49,8 @@ assert res["macro_f05"] > 0.6, res["macro_f05"]
 print("ALL OK")
 
 # streaming ownership == in-memory ownership; refit; grid endpoints
-from ber.predict import reduce_owners_streaming
-from ber.train import refit_full
+from predict import reduce_owners_streaming
+from train import refit_full
 parts = [sc.iloc[i::4] for i in range(4)]
 w = reduce_owners_streaming(parts)
 full = assign_owners(sc, 0.0)
@@ -63,3 +63,9 @@ assert "ownership" in res and 0 <= res["all_empty_baseline"] <= 1
 refit_full(df, f"{od}/bundle.json", od)
 import os; assert os.path.exists(f"{od}/lgbm_full.txt")
 print("ALL OK 2")
+
+from predict import validation_report
+rep = validation_report(sc, pd.concat([sizes, pd.Series({"S1-nocand": 0, "S1-nocand2": 2})]))
+assert rep["s1_with_no_candidates"] == 2 and rep["n_val_s1"] == len(sizes) + 2
+assert rep["with_ownership"]["macro_f05"] >= 0
+print("ALL OK 3", {k: rep[k] for k in ("with_ownership", "without_ownership")})

@@ -17,11 +17,12 @@ import scipy.sparse as sp
 from anyascii import anyascii
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from ber.predict import assign_owners, sweep_threshold, ownership_report
-from ber.split import load_val_ids
-from ber.train import gold_sizes, load_gold_pairs
+from predict import assign_owners, sweep_threshold, ownership_report
+from valsplit import load_val_ids
+from train import gold_sizes, load_gold_pairs
 
-DATA = "student_resource/dataset/train"
+from valsplit import TRAIN_DIR, GT_PATH
+DATA = str(TRAIN_DIR)
 NAME_STOP = {"pvt", "ltd", "private", "limited", "llc", "inc", "corp", "corporation", "co", "company", "sarl",
              "sas", "sasu", "eurl", "sa", "gmbh", "and", "the", "llp", "opc", "dba", "fka", "of"}
 ADDR_MAP = {"rd": "road", "st": "street", "ave": "avenue", "blvd": "boulevard", "dr": "drive", "ln": "lane",

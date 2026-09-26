@@ -50,7 +50,7 @@ def macro_f05_scored(scored: pd.DataFrame, gold_sizes: pd.Series, t: float, owne
     return float(f.mean())
 
 
-def sweep_threshold(scored: pd.DataFrame, gold_sizes: pd.Series, grid=None) -> Dict[str, float]:
+def sweep_threshold(scored: pd.DataFrame, gold_sizes: pd.Series, grid=None, owners: bool = True) -> Dict[str, float]:
     """Pick t maximising macro F0.5 after ownership.
 
     Coarse pass: 0.10-0.95 step 0.05 plus the all (t=0) and none (t=1.01) endpoints; then a 0.01-step
@@ -58,12 +58,12 @@ def sweep_threshold(scored: pd.DataFrame, gold_sizes: pd.Series, grid=None) -> D
     """
     if grid is None:
         coarse = [0.0] + [round(x, 2) for x in np.arange(0.10, 0.951, 0.05)] + [1.01]
-        curve = {t: macro_f05_scored(scored, gold_sizes, t) for t in coarse}
+        curve = {t: macro_f05_scored(scored, gold_sizes, t, owners) for t in coarse}
         b = max(curve, key=curve.get)
         for t in np.round(np.arange(max(b - 0.05, 0.0), min(b + 0.05, 1.0) + 1e-9, 0.01), 2):
-            curve.setdefault(float(t), macro_f05_scored(scored, gold_sizes, float(t)))
+            curve.setdefault(float(t), macro_f05_scored(scored, gold_sizes, float(t), owners))
     else:
-        curve = {float(t): macro_f05_scored(scored, gold_sizes, float(t)) for t in grid}
+        curve = {float(t): macro_f05_scored(scored, gold_sizes, float(t), owners) for t in grid}
     best = max(curve, key=curve.get)
     return {"t": best, "macro_f05": curve[best], "curve": curve}
 
@@ -92,6 +92,21 @@ def ownership_report(scored: pd.DataFrame, gold_sizes: pd.Series, t: float) -> D
     return {"with_ownership": macro_f05_scored(scored, gold_sizes, t, True),
             "without_ownership": macro_f05_scored(scored, gold_sizes, t, False),
             "collision_rate": coll}
+
+
+def validation_report(scored: pd.DataFrame, gold_sizes: pd.Series) -> Dict[str, dict]:
+    """Best macro F0.5 with and without target ownership, each with its own tuned threshold.
+
+    gold_sizes must cover EVERY validation S1 (index = s1_id), so S1s with zero candidates score as
+    empty predictions (1.0 on true singletons, 0.0 otherwise).
+    """
+    w = sweep_threshold(scored, gold_sizes, owners=True)
+    wo = sweep_threshold(scored, gold_sizes, owners=False)
+    return {"with_ownership": {"t": w["t"], "macro_f05": w["macro_f05"]},
+            "without_ownership": {"t": wo["t"], "macro_f05": wo["macro_f05"]},
+            "ownership_at_best_t": ownership_report(scored, gold_sizes, w["t"]),
+            "n_val_s1": int(len(gold_sizes)), "n_pairs": int(len(scored)),
+            "s1_with_no_candidates": int((~gold_sizes.index.isin(scored["s1_id"].unique())).sum())}
 
 
 def write_matches(lists: Dict[str, Set[str]], path: str, header: str = "source1_entity_id\tmatched_entity_ids") -> None:
