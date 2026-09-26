@@ -181,3 +181,32 @@ so it must not be used to pick a threshold.
   model is actually fitted on.
 - **`feature_columns(table)`** is now the train/predict column contract. "Numeric columns" is
   not a safe test: `label` is int8 and passes it.
+
+### v3 adapter — features over A's real candidates (2026-09-27)
+
+Regenerated A's candidate files locally with the frozen config (A's Drive copies never reached
+this machine): `cand_val50k` 1,183,283 pairs @ 23.67 cands/S1, `cand_fit200k` 4,732,479 pairs @
+23.66 — both matching A's reported 23.7.
+
+| set | pairs | features | positives | throughput | peak RAM |
+|-----|-------|----------|-----------|-----------|----------|
+| cand_val50k | 1,183,283 | 43 | 160,824 (13.59%) | 21,543 /s | 3.1 GB |
+| cand_fit200k | 4,732,479 | 43 | 644,259 (13.61%) | 21,616 /s | 5.3 GB |
+
+**43 features, not 45.** v3 has no A/P/B/C channels, so `ch_*` + `n_channels` (5) are replaced by
+`from_blank_index`, `retr_tok_score`, `retr_name_sim` (3). 31 base + 12 retrieval = 43.
+
+Strongest separation is now the retrieval and competition block, ahead of every string feature:
+`retr_score` +99.6, `score_gap_best` -94.5, `retr_rank` -10.2, then `rev_score_gap`, `rev_count`,
+`rev_rank`. On fit200k a true match sits at `rev_rank` 0.002 against 5.62 for a non-match — i.e.
+a true pair is nearly always the top bidder for its target. Best string features are
+`acronym_match` +0.543 and `addr_norm_tfidf` +0.490.
+
+Address TF-IDF refitted over all 6 normalized sources (587,799 sampled addresses, vocab 18,776).
+French addresses now produce 20-24 nonzero trigrams where they previously scored all-zero.
+
+**Scale caveat on the competition features.** `rev_*` is computed within one candidate set, so it
+is not comparable across sets: negatives average `rev_count` 4.0 on val50k (50k S1s) against 13.2
+on fit200k (200k S1s). At test scale (1.73M S1s) it will be larger again, so a model trained on
+fit200k meets a shifted distribution at inference. `rev_rank` and `rev_score_gap` are more robust
+than the raw `rev_count`.

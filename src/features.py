@@ -275,7 +275,7 @@ CORE_RETRIEVAL = ["retr_score", "retr_rank", "rank_frac", "cand_count",
                   "score_gap_best", "score_ratio_best",
                   "rev_rank", "rev_count", "rev_score_gap"]
 # blocking.py v3 (frozen) emits tok_score / name_sim / final_rank and has no A/P/B/C channels.
-V3_EXTRA = ["retr_tok_score", "retr_name_sim", "blank_addr_index"]
+V3_EXTRA = ["retr_tok_score", "retr_name_sim", "from_blank_index"]
 # legacy channel-union schema (blocking v1/v2), kept so older parquets still work
 CHANNEL_EXTRA = [f"ch_{c}" for c in CHANNELS] + ["n_channels"]
 RETRIEVAL_FEATURES = CORE_RETRIEVAL + V3_EXTRA + CHANNEL_EXTRA
@@ -339,7 +339,7 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
         spec = dict(retr_score=("_score", "max"), retr_rank=(rank_col, "min"),
                     retr_tok_score=("tok_score", "max"), retr_name_sim=("name_sim", "max"))
         if "blank_addr_index" in cols:
-            spec["blank_addr_index"] = ("blank_addr_index", "max")
+            spec["from_blank_index"] = ("blank_addr_index", "max")
     else:
         df = df.assign(_score=df["score"].to_numpy(np.float32))
         spec = dict(retr_score=("_score", "max"), retr_rank=(rank_col, "min"))
@@ -374,7 +374,7 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
     agg["rev_count"] = agg.groupby("cand_id")["cand_id"].transform("size").astype(np.float32)
     agg["rev_score_gap"] = (gc.transform("max") - agg["retr_score"]).astype(np.float32)
 
-    for c in ("retr_score", "retr_rank", "retr_tok_score", "retr_name_sim", "blank_addr_index"):
+    for c in ("retr_score", "retr_rank", "retr_tok_score", "retr_name_sim", "from_blank_index"):
         if c in agg.columns:
             agg[c] = agg[c].astype(np.float32)
     if "retr_name_sim" in agg.columns:
@@ -386,12 +386,42 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
     return agg
 
 
-def build(cand_path, split: str = "train", batch: int = 500_000) -> tuple:
+def attach_labels(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Add an int8 `label` from train_ground_truth: 1 if the pair is a true match."""
+    from blocking import gt_pairs
+    gt = gt_pairs()
+    truth = set(zip(gt["s1_id"].to_numpy(), gt["cand_id"].to_numpy()))
+    df["label"] = np.fromiter((1 if k in truth else 0
+                               for k in zip(df["s1_id"].to_numpy(), df["cand_id"].to_numpy())),
+                              np.int8, len(df))
+    return df
+
+
+def constant_columns(tbl: pa.Table) -> list:
+    """Feature columns with a single distinct value in THIS table.
+
+    Reported, never dropped. Dropping per file would give the fitting and validation parquets
+    different column sets whenever a feature is constant in one and not the other, and the
+    model would then be trained and scored on different schemas.
+    """
+    out = []
+    for c in feature_columns(tbl):
+        v = np.asarray(tbl[c], dtype=np.float32)
+        if v.size and float(v.min()) == float(v.max()):
+            out.append(c)
+    return out
+
+
+def build(cand_path, split: str = "train", batch: int = 500_000,
+          labels: bool = False) -> tuple:
     """Features for every distinct pair in the candidate parquet, batched."""
     import pandas as pd
     raw = pq.read_table(cand_path)
     with timed(f"collapse candidates ({raw.num_rows:,} rows)"):
         df = collapse(raw)
+    if labels and "label" not in df.columns:
+        with timed("attach ground-truth labels"):
+            df = attach_labels(df)
     retr = [c for c in RETRIEVAL_FEATURES if c in df.columns]
     n = len(df)
     print(f"  {n:,} distinct pairs; retrieval features: "
@@ -461,12 +491,27 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="output parquet (default: <candidates>_feats)")
     ap.add_argument("--batch", type=int, default=500_000)
     ap.add_argument("--report", action="store_true", help="print label means and throughput")
+    ap.add_argument("--labels", action="store_true",
+                    help="attach label from train_ground_truth (train split only)")
+    ap.add_argument("--head", type=int, default=0, help="smoke-test on the first N pairs only")
     args = ap.parse_args()
 
-    tbl, elapsed = build(args.candidates, args.split, args.batch)
+    src_path = args.candidates
+    if args.head:
+        sub = pq.read_table(src_path).slice(0, args.head)
+        src_path = str(ART / "_head_sample.parquet")
+        pq.write_table(sub, src_path)
+        print(f"smoke test on the first {args.head:,} rows", file=sys.stderr, flush=True)
+
+    tbl, elapsed = build(src_path, args.split, args.batch, args.labels)
     out = args.out or str(args.candidates).replace(".parquet", "_features.parquet")
     pq.write_table(tbl, out, compression="zstd")
-    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(feature_columns(tbl))} features")
+    names = feature_columns(tbl)
+    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(names)} features")
+    const = constant_columns(tbl)
+    if const:
+        print(f"  constant in this file (kept, so fit/val schemas stay identical): "
+              f"{', '.join(const)}")
     if args.report:
         report(tbl, elapsed)
 
