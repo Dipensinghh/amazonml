@@ -3,6 +3,7 @@ dataset/
 sample/
 artifacts/
 output/
+logs/
 *.zip
 *.parquet
 *.tsv

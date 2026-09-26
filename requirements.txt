@@ -1,0 +1,12 @@
+# Python 3.14.4 (Windows 11). All CPU-only, no pretrained models.
+numpy==2.4.6
+scipy==1.17.1
+pandas==2.3.3
+pyarrow==24.0.0
+scikit-learn==1.9.0
+sparse_dot_topn==1.2.0
+rapidfuzz==3.14.6
+ftfy==6.3.1
+anyascii==0.3.3
+lightgbm==4.7.0
+psutil==7.2.2
