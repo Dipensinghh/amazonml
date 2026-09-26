@@ -65,6 +65,19 @@ so it must not be used to pick a threshold.
 
 Limits of E01: 2,000-S1 sample (noisy, thin ownership competition); own light normalisation (not B's); word-level retrieval (not C's trigram channels); no acronym channel; names made only of common tokens get no name candidates.
 
+### D: first LightGBM on B's dev feature sets (E03 preview, NOT a real result)
+
+Fit: `dev_candidates_fit_features.parquet` (468,900 pairs, 20,000 fitting S1s). Validation: `dev_candidates_features.parquet` (117,287 pairs, 5,000 val S1s; 14.7% positive; 100% true-match recall; negatives are token-overlap, only 81 random-pool). 31 base features, playbook params, early stop at 727 trees (val log loss 0.0130).
+
+| model (same 117,287 val pairs) | macro F0.5 | threshold |
+|---|---|---|
+| all-empty | 0.060 | - |
+| rules: 0.4*name_core_jw + 0.6*addr_norm_tfidf | 0.935 | 0.59 |
+| LightGBM | **0.981** | 0.73 |
+
+LightGBM beats the rules by +0.047 on identical pairs. Ownership effect: 0 (collision rate 0.0 at 5,000 S1s). Top gain: `addr_phon_token_set`, `addr_norm_token_set` (address dominates), then `name_norm_token_sort`, address TF-IDF, `num_conflict`.
+Caveat: not comparable to E01 (0.662) - those were real top-k candidates with 93% recall; this set has 100% recall and easier negatives. Threshold 0.73 is not usable. Redo on C's real candidates.
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |

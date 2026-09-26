@@ -58,9 +58,12 @@ PARAMS = dict(objective="binary", n_estimators=800, learning_rate=0.05, num_leav
 
 
 def train(df: pd.DataFrame, val_ids: set, gt_path: str, out_dir: str = "artifacts",
-          fit_s1_frac: float = 1.0, params: dict = None) -> dict:
+          fit_s1_frac: float = 1.0, params: dict = None, scope_ids: set = None) -> dict:
     """Fit LightGBM on fitting S1s, early-stop (log loss) on validation S1s, tune threshold after ownership.
 
+    scope_ids: the S1s actually evaluated (a sample of validation S1s, including any with zero candidates).
+    Defaults to the validation S1s present in df, which under-counts zero-candidate S1s: pass the full
+    sample id list for a real run.
     fit_s1_frac < 1 keeps a deterministic subset of fitting S1s (full target search space retained).
     Saves the model, and a bundle.json holding the ordered feature schema, best iteration, threshold,
     library versions and settings. Returns the sweep result plus ownership/baseline diagnostics.
@@ -81,7 +84,8 @@ def train(df: pd.DataFrame, val_ids: set, gt_path: str, out_dir: str = "artifact
               callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)])
     va["p"] = model.predict_proba(va[cols])[:, 1]
     sizes = gold_sizes(gt_path)
-    sizes = sizes[sizes.index.isin(val_ids)]
+    scope = set(scope_ids) if scope_ids is not None else set(va["s1_id"])
+    sizes = sizes[sizes.index.isin(scope & set(val_ids))]
     res = sweep_threshold(va, sizes)
     res["ownership"] = ownership_report(va, sizes, res["t"])
     res["all_empty_baseline"] = float((sizes == 0).mean())
@@ -118,10 +122,14 @@ if __name__ == "__main__":
     ap.add_argument("--gt", default=str(GT_PATH))
     ap.add_argument("--out-dir", default="artifacts")
     ap.add_argument("--fit-s1-frac", type=float, default=1.0)
+    ap.add_argument("--scope-ids", help="text file of the S1 ids evaluated (one per line); default: val S1s present in the data")
+    ap.add_argument("--extra-features", nargs="*", default=[], help="more feature parquets to concatenate (e.g. validation-side pairs)")
     ap.add_argument("--refit-full", action="store_true", help="after training, refit on all labelled S1s with the best iteration")
     a = ap.parse_args()
-    feats = pd.read_parquet(a.features)
+    feats = pd.concat([pd.read_parquet(f) for f in [a.features, *a.extra_features]], ignore_index=True)
+    feats = feats.drop_duplicates(["s1_id", "cand_id"])
     df = attach_labels(feats, a.gt)
-    train(df, load_val_ids(), a.gt, a.out_dir, a.fit_s1_frac)
+    scope = {l.strip() for l in open(a.scope_ids)} if a.scope_ids else None
+    train(df, load_val_ids(), a.gt, a.out_dir, a.fit_s1_frac, scope_ids=scope)
     if a.refit_full:
         refit_full(df, f"{a.out_dir}/bundle.json", a.out_dir)
