@@ -11,7 +11,7 @@ from typing import Dict, Iterable, Set
 import numpy as np
 import pandas as pd
 
-META = {"s1_id", "cand_id", "source", "y", "p"}
+META = {"s1_id", "cand_id", "source", "y", "p", "label", "neg_kind"}  # keys, labels, provenance: never features
 
 
 def assign_owners(scored: pd.DataFrame, t: float) -> pd.DataFrame:

@@ -69,3 +69,11 @@ rep = validation_report(sc, pd.concat([sizes, pd.Series({"S1-nocand": 0, "S1-noc
 assert rep["s1_with_no_candidates"] == 2 and rep["n_val_s1"] == len(sizes) + 2
 assert rep["with_ownership"]["macro_f05"] >= 0
 print("ALL OK 3", {k: rep[k] for k in ("with_ownership", "without_ownership")})
+
+# B's feature parquet carries label + neg_kind: they must never become features
+lk = df.assign(label=df["y"], neg_kind="pos")
+assert "label" not in feature_columns(lk) and "neg_kind" not in feature_columns(lk)
+try:
+    train(df[df["s1_id"].isin(set(s1[:60]))], set(s1[:60]), gt, out_dir=tempfile.mkdtemp()); raise SystemExit("val-only set not rejected")
+except ValueError: pass
+print("ALL OK 4")
