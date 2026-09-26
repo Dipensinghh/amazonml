@@ -71,7 +71,7 @@ Blocking + classifier pipeline. Names and addresses are normalized and translite
 ---
 
 ## Appendix A: Code structure and reproduction
-`src/normalize.py` (normalization and transliteration), `src/blocking.py` (candidate generation), `src/features.py` (pair features), `src/evaluate.py` (exact macro F0.5, candidate diagnostics), `src/train.py` (labels, LightGBM, model bundle), `src/predict.py` (scoring, global ownership, threshold sweep, TSV writer), `src/fallback_sample.py` (D sample rules baseline; A owns `src/fallback.py`), `src/valsplit.py` (shared split). Pinned environment in `requirements.txt`. **[pending: single entry point and run instructions]**
+`src/normalize.py` (normalization and transliteration), `src/blocking.py` (candidate generation), `src/features.py` (pair features), `src/evaluate.py` (exact macro F0.5, candidate diagnostics), `src/train.py` (labels, LightGBM, model bundle), `src/predict.py` (scoring, global ownership, threshold sweep, TSV writer), `src/fallback_e01.py` (D sample rules baseline E01; A owns the submission fallback `src/fallback.py`), `src/valsplit.py` (shared split). Pinned environment in `requirements.txt`. **[pending: single entry point and run instructions]**
 
 ## Appendix B: Provenance
 No external data, APIs, gazetteers or pretrained models are used. Libraries: scikit-learn, LightGBM, RapidFuzz, sparse_dot_topn, anyascii, ftfy, pyarrow, pandas. **[pending: final versions, runtime, hardware, hashes of the submitted outputs]**

@@ -1,4 +1,4 @@
-"""E01 rules-based fallback: word-level TF-IDF retrieval + a hand-weighted score + tuned threshold + global ownership.
+"""E01 rules-based sample baseline (D; the submission fallback is A's src/fallback.py): word-level TF-IDF retrieval + a hand-weighted score + tuned threshold + global ownership.
 
 Stand-in for the real blocker/features (owned by C and B): it uses its own light text cleaning and a
 sample of validation S1s searched against ALL train S2/S3 records of the same country and source, so the
