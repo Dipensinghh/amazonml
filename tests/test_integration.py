@@ -174,3 +174,14 @@ def test_encode_many_matches_encode_id():
     from checks import _encode_many, encode_id
     ids = ["S2-1", "S3-999999999999", "S2-192345572", "S3-10", "S2-100"]
     assert _encode_many(ids).tolist() == [encode_id(x) for x in ids]
+
+
+def test_write_outputs_arrow_input_same_bytes(fixture, tmp_path):
+    """Arrow tables / arrays give byte-identical files to pandas input."""
+    import pyarrow as pa
+    _, scores = fixture
+    matches = decide(scores, 0.5)
+    m1, c1 = write_outputs(S1, scores, matches, tmp_path / "pd")
+    m2, c2 = write_outputs(pa.array(S1), pa.Table.from_pandas(scores, preserve_index=False),
+                           pa.Table.from_pandas(matches, preserve_index=False), tmp_path / "pa")
+    assert m1.read_bytes() == m2.read_bytes() and c1.read_bytes() == c2.read_bytes()
