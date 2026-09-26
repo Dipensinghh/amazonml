@@ -24,8 +24,10 @@ import numpy as np
 MATCHING_HEADER = b"source1_entity_id\tmatched_entity_ids"
 CANDIDATE_HEADER = b"source1_entity_id\tcandidate_entity_ids"
 _ID_RE = re.compile(r"S([123])-([1-9][0-9]{0,11})\Z")
+_LIST_RE = re.compile(r"S[23]-[1-9][0-9]{0,11}(?:,S[23]-[1-9][0-9]{0,11})*")
 _BASE = 10**12
-_CHUNK = 200_000  # rows buffered before a vectorized membership check
+_ID_WIDTH = 15  # len("S2-") + 12 digits
+_CHUNK = 1_000_000  # ids buffered before a vectorized membership check
 MAX_EXAMPLES = 5
 
 
@@ -35,24 +37,44 @@ def encode_id(s: str) -> int:
     return int(m.group(1)) * _BASE + int(m.group(2)) if m else -1
 
 
+def _encode_many(ids: list) -> np.ndarray:
+    """Vectorized encode_id for ids already validated by _LIST_RE.
+
+    Reads the fixed-width UTF-32 code points of a numpy 'U15' array instead of
+    parsing each id in Python (tens of millions of candidate ids).
+    """
+    if not ids:
+        return np.empty(0, dtype=np.int64)
+    c = np.asarray(ids, dtype=f"U{_ID_WIDTH}").view(np.uint32).reshape(len(ids), _ID_WIDTH)
+    num = np.zeros(len(ids), dtype=np.int64)
+    for j in range(3, _ID_WIDTH):
+        d = c[:, j].astype(np.int64)
+        num = np.where(d > 0, num * 10 + d - 48, num)  # 0 = padding past the last digit
+    return (c[:, 1].astype(np.int64) - 48) * _BASE + num
+
+
 def _fmt(v) -> str:
     """Inverse of encode_id for error messages."""
     return f"S{int(v) // _BASE}-{int(v) % _BASE}"
 
 
 def load_source_ids(path: Path) -> np.ndarray:
-    """Sorted unique int64 ids from the first column of a source TSV (header skipped)."""
-    out, bad = [], []
-    with open(path, encoding="utf-8", newline="") as f:
-        next(f, None)
-        for line in f:
-            s = line.split("\t", 1)[0].strip()
-            if s:
-                v = encode_id(s)
-                (bad if v < 0 else out).append(s if v < 0 else v)
-    if bad:  # our int encoding relies on canonical ids; refuse silently-lossy input
-        raise ValueError(f"{path}: non-canonical ids, e.g. {bad[:3]}")
-    return np.unique(np.asarray(out, dtype=np.int64))
+    """Sorted unique int64 ids from the entity_id column of a source TSV (pyarrow, vectorized)."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.csv as pacsv
+    col = pacsv.read_csv(
+        path,
+        parse_options=pacsv.ParseOptions(delimiter="\t", quote_char=False),
+        convert_options=pacsv.ConvertOptions(include_columns=["entity_id"],
+                                             column_types={"entity_id": pa.string()}),
+    )["entity_id"]
+    ok = pc.match_substring_regex(col, r"^S[123]-[1-9][0-9]{0,11}$")
+    if not pc.all(ok).as_py():  # our int encoding relies on canonical ids; refuse lossy input
+        raise ValueError(f"{path}: non-canonical ids, e.g. {col.filter(pc.invert(ok))[:3].to_pylist()}")
+    src = pc.cast(pc.utf8_slice_codeunits(col, 1, 2), pa.int64()).to_numpy()
+    num = pc.cast(pc.utf8_slice_codeunits(col, 3), pa.int64()).to_numpy()
+    return np.unique(src * _BASE + num)
 
 
 def _isin_sorted(values: np.ndarray, sorted_ref: np.ndarray) -> np.ndarray:
@@ -102,21 +124,26 @@ def _scan_file(path: Path, header: bytes, tag: str, s1_ref: np.ndarray, tgt_ref:
     (S1, target) pair, used for the matches ⊆ candidates check.
     """
     n_tgt = len(tgt_ref)
+    # Scalar np.searchsorted costs ~0.25 ms/call here; a dict lookup is far faster.
+    s1_index = {_fmt(v): k for k, v in enumerate(s1_ref)}
     seen_s1 = np.zeros(len(s1_ref), dtype=bool)
-    keys, buf_s1, buf_tgt = [], [], []
+    keys = []
+    buf_ids, buf_s1, buf_cnt = [], [], []  # well-formed rows: raw id strings
+    slow_s1, slow_tgt = [], []  # ids from rows that needed per-id diagnosis
 
     def flush():
         """Membership-check buffered targets and turn them into pair keys."""
-        if not buf_tgt:
+        if not buf_ids and not slow_tgt:
             return
-        t = np.asarray(buf_tgt, dtype=np.int64)
-        s = np.asarray(buf_s1, dtype=np.int64)
+        t = np.concatenate([_encode_many(buf_ids), np.asarray(slow_tgt, dtype=np.int64)])
+        s = np.concatenate([np.repeat(np.asarray(buf_s1, dtype=np.int64), buf_cnt),
+                            np.asarray(slow_s1, dtype=np.int64)])
         ok = _isin_sorted(t, tgt_ref)
         rep.add_bulk(f"{tag}: id not in test S2/S3", [_fmt(v) for v in t[~ok][:MAX_EXAMPLES]],
                      int((~ok).sum()))
         keys.append(s[ok] * n_tgt + np.searchsorted(tgt_ref, t[ok]))
-        buf_s1.clear()
-        buf_tgt.clear()
+        for b in (buf_ids, buf_s1, buf_cnt, slow_s1, slow_tgt):
+            b.clear()
 
     with open(path, "rb") as f:
         raw = f.readline()
@@ -148,9 +175,8 @@ def _scan_file(path: Path, header: bytes, tag: str, s1_ref: np.ndarray, tgt_ref:
             if prev is not None and s1 <= prev:
                 rep.add(f"{tag}: rows not strictly sorted by S1 id", s1)
             prev = s1
-            v1 = encode_id(s1)
-            i = int(np.searchsorted(s1_ref, v1))
-            if v1 < 0 or i >= len(s1_ref) or s1_ref[i] != v1:
+            i = s1_index.get(s1)
+            if i is None:
                 rep.add(f"{tag}: S1 id not in test S1", s1)
                 continue
             if seen_s1[i]:
@@ -164,14 +190,19 @@ def _scan_file(path: Path, header: bytes, tag: str, s1_ref: np.ndarray, tgt_ref:
                 rep.add(f"{tag}: ids not sorted", s1)
             if len(set(ids)) != len(ids):
                 rep.add(f"{tag}: duplicate id in list", s1)
-            for x in ids:
-                v = encode_id(x)
-                if v < 0 or v // _BASE == 1:
-                    rep.add(f"{tag}: malformed / non S2-S3 id", f"{s1}:{x!r}")
-                else:
-                    buf_s1.append(i)
-                    buf_tgt.append(v)
-            if len(buf_tgt) >= _CHUNK:
+            if _LIST_RE.fullmatch(rest):
+                buf_ids.extend(ids)
+                buf_s1.append(i)
+                buf_cnt.append(len(ids))
+            else:
+                for x in ids:
+                    v = encode_id(x)
+                    if v < 0 or v // _BASE == 1:
+                        rep.add(f"{tag}: malformed / non S2-S3 id", f"{s1}:{x!r}")
+                    else:
+                        slow_s1.append(i)
+                        slow_tgt.append(v)
+            if len(buf_ids) >= _CHUNK:
                 flush()
         flush()
     missing = np.flatnonzero(~seen_s1)
@@ -196,7 +227,8 @@ def check_outputs(matching_path, candidate_path, test_dir) -> Report:
     rep.add_bulk("matching: S2/S3 id matched to more than one S1",
                  [_fmt(v) for v in multi[:MAX_EXAMPLES]], len(multi))
     ckeys = _scan_file(Path(candidate_path), CANDIDATE_HEADER, "candidate", s1_ref, tgt_ref, rep)
-    notin = ~np.isin(mkeys, ckeys)
+    ckeys.sort()  # in place; np.isin would need several extra copies of ~50M keys
+    notin = ~_isin_sorted(mkeys, ckeys)
     del ckeys
     ex = [f"{_fmt(s1_ref[k // len(tgt_ref)])}:{_fmt(tgt_ref[k % len(tgt_ref)])}"
           for k in mkeys[notin][:MAX_EXAMPLES]]

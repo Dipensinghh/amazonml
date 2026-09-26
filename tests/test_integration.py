@@ -167,3 +167,10 @@ def test_organizer_validator(fixture, tmp_path):
                         "--test-dir", str(test_dir), "--check-ids"], capture_output=True, text=True)
     assert r.returncode == 0 and "PASS" in r.stdout, r.stdout + r.stderr
     assert "WARNING" not in r.stdout, r.stdout
+
+
+def test_encode_many_matches_encode_id():
+    """Vectorized id encoding agrees with the scalar one, incl. max-width ids."""
+    from checks import _encode_many, encode_id
+    ids = ["S2-1", "S3-999999999999", "S2-192345572", "S3-10", "S2-100"]
+    assert _encode_many(ids).tolist() == [encode_id(x) for x in ids]
