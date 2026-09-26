@@ -1,7 +1,7 @@
 """Stage 2b (dev) — a small labelled candidate set so feature and model work can start
 before the real blocking output exists.
 
-Takes N validation S1s (the frozen 20% split from blocking.make_split, seed 42) and pairs each
+Takes N S1s from one side of the frozen 20% split (blocking.make_split, seed 42) and pairs each
 with every true S2/S3 target from the ground truth (label 1) plus ~K hard negatives from the
 SAME country that share at least one name_core token, name_phon token or addr_postal token
 (label 0).
@@ -22,7 +22,17 @@ to mean something.
 
 Output: artifacts/dev_candidates.parquet  (s1_id, cand_id, label, neg_kind)
 
-Usage: python -u src/dev_candidates.py [--n-s1 5000] [--negatives 20]
+--side picks which S1s to draw from: "val" (default) for the held-out 20%, "fit" for the 80% a
+model must actually be trained on, or "both". A model fitted on --side val and validated on the
+same S1s would be scoring its own training rows, so training sets need --side fit.
+
+Note this set is deliberately unrealistic: it keeps 100% of each S1's true matches plus a fixed
+20 negatives (~15% positive), where real blocking output is nearer 8-9% positive with imperfect
+recall. It is for exercising code and comparing features, not for choosing a threshold.
+
+Usage:
+  python -u src/dev_candidates.py --side val --n-s1 5000     # dev/eval set
+  python -u src/dev_candidates.py --side fit --n-s1 20000    # trainable set
 """
 import argparse
 import random
@@ -41,12 +51,16 @@ TOK_COLS = ("name_core", "name_phon", "addr_postal")
 IDX_COLS = ["entity_id", "country", *TOK_COLS]
 
 
-def query_rows(n_s1: int) -> pa.Table:
-    """The n_s1 sampled validation S1 rows, with the columns used for token overlap."""
+def query_rows(n_s1: int, side: str) -> pa.Table:
+    """The n_s1 sampled S1 rows from the requested side of the split."""
     t = pq.read_table(norm_path("train", "S1"), columns=IDX_COLS)
     is_val = make_split(t["entity_id"].to_pandas())
-    val = t["entity_id"].filter(pa.array(is_val)).to_numpy(zero_copy_only=False)
-    keep = sample_ids(val, n_s1)
+    if side == "both":
+        pool = t["entity_id"].to_numpy(zero_copy_only=False)
+    else:
+        mask = is_val if side == "val" else ~is_val
+        pool = t["entity_id"].filter(pa.array(mask)).to_numpy(zero_copy_only=False)
+    keep = sample_ids(pool, n_s1)
     return t.filter(pc.is_in(t["entity_id"], value_set=pa.array(keep)))
 
 
@@ -124,7 +138,10 @@ def build_index(wanted: set, cap: int, max_df: int, batch: int, pool_cap: int) -
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--n-s1", type=int, default=5000, help="validation S1s to sample")
+    ap.add_argument("--side", default="val", choices=["val", "fit", "both"],
+                    help="which side of the split to draw S1s from (fit = trainable)")
+    ap.add_argument("--n-s1", type=int, default=5000, help="S1s to sample")
+    ap.add_argument("--out", default=None, help="output parquet (default names by --side)")
     ap.add_argument("--negatives", type=int, default=20, help="hard negatives per S1")
     ap.add_argument("--cap", type=int, default=400, help="max postings kept per token")
     ap.add_argument("--max-df", type=int, default=250_000,
@@ -135,8 +152,8 @@ def main() -> None:
     args = ap.parse_args()
 
     with timed("load queries"):
-        q = query_rows(args.n_s1)
-    print(f"queries: {q.num_rows:,} val S1", file=sys.stderr, flush=True)
+        q = query_rows(args.n_s1, args.side)
+    print(f"queries: {q.num_rows:,} {args.side} S1", file=sys.stderr, flush=True)
 
     with timed("ground-truth positives"):
         gt = gt_pairs()
@@ -200,11 +217,13 @@ def main() -> None:
                     "label": pa.array(rows_lab, type=pa.int8()),
                     "neg_kind": pa.array(rows_kind, type=pa.string())})
     ART.mkdir(exist_ok=True)
-    pq.write_table(out, ART / "dev_candidates.parquet", compression="zstd")
+    dest = args.out or str(ART / (f"dev_candidates.parquet" if args.side == "val"
+                                  else f"dev_candidates_{args.side}.parquet"))
+    pq.write_table(out, dest, compression="zstd")
 
     n_pos = sum(rows_lab)
     n_pool = rows_kind.count("pool")
-    print(f"\nwrote {ART / 'dev_candidates.parquet'}: {out.num_rows:,} pairs "
+    print(f"\nwrote {dest}: {out.num_rows:,} pairs "
           f"({n_pos:,} positive, {out.num_rows - n_pos:,} negative "
           f"= {out.num_rows - n_pos - n_pool:,} overlap + {n_pool:,} pool) over {q.num_rows:,} S1"
           f"\n  {n_no_neg:,} S1 had no token-overlap negative (filled from the country pool)"

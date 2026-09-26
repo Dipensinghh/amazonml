@@ -1,8 +1,16 @@
 """Stage 3 — pair features for candidate (s1_id, cand_id) rows.
 
-Input : a candidate parquet with at least s1_id and cand_id (an optional `label` column is
-        carried through untouched), plus the normalized parquets from normalize.py.
-Output: one float32 row per candidate pair, keyed by (s1_id, cand_id).
+Input : a candidate parquet with at least s1_id and cand_id, plus the normalized parquets from
+        normalize.py. If it also carries blocking.py's channel/score/rank columns, the retrieval
+        and competition features below are added. `label` and `neg_kind` pass through untouched.
+Output: one float32 row per DISTINCT (s1_id, cand_id) pair.
+
+blocking.py emits one row per (pair, channel), so a pair found by three channels appears three
+times. build() collapses those first (score = max, rank = min, one flag per channel); anything
+consuming a raw blocking parquet without collapsing would double-count pairs.
+
+Column contract: do NOT assume "the numeric columns are the features" — `label` is int8 and would
+sail through that test. Use feature_columns(table), which returns exactly the model inputs.
 
 31 features, all float32, all symmetric-free (they never look at the raw ids, the country, or
 anything that would not exist at test time):
@@ -16,6 +24,13 @@ anything that would not exist at test time):
              postal-token agree / conflict / missing                             (6)
   context    either-side blank address, candidate was non-Latin, source is S3    (3)
 
+Added only when the candidate file carries channel/score/rank (i.e. real blocking output):
+
+  retrieval  one flag per channel (A/P/B/C), channel count, best score, best rank,
+             rank as a fraction of the S1's list, candidate-list size                (9)
+  competition gap and ratio to the S1's best candidate; the pair's rank among the S1s
+             competing for that same target, that target's contender count and score gap (5)
+
 `source` is taken from the S2-/S3- prefix, which is a source marker rather than an identity
 feature; no country one-hot and no numeric id is used, per CLAUDE_v2.md.
 
@@ -27,8 +42,11 @@ loaded (streamed and filtered), so peak RAM tracks the candidate set, not the 10
 String similarity runs through rapidfuzz.process.cpdist(workers=-1), which releases the GIL and
 uses every core.
 
-The address TF-IDF vectorizers are fitted once and cached to artifacts/addr_tfidf.joblib so that
-train and test features share a vocabulary; delete that file to refit.
+The address TF-IDF vectorizers are fitted on a sample of the FULL normalized corpus (every
+split/source parquet present, train and test) and cached to artifacts/addr_tfidf.joblib, so
+train and test share a vocabulary. Fitting on the candidate set instead would leave the test-only
+France text with no vocabulary at all. The cache records which sources it saw and warns when
+more have since appeared; delete the file to refit.
 
 Usage:
   python -u src/features.py --candidates artifacts/dev_candidates.parquet --report
@@ -66,29 +84,42 @@ TFIDF_PARAMS = dict(analyzer="char_wb", ngram_range=(3, 3), sublinear_tf=True,
 
 
 # ---------------------------------------------------------------- record loading
-def load_records(ids: set, split: str, sources: tuple) -> dict:
-    """entity_id -> row dict, for the given ids only.
+def load_records(ids: pa.Array, split: str, sources: tuple) -> pa.Table:
+    """The referenced normalized rows, as one Arrow table.
 
-    Streams each normalized parquet in batches and keeps just the referenced rows, so a
-    candidate set that touches 1% of the corpus costs 1% of the memory.
+    Arrow-backed rather than a dict of per-row dicts: at ~10M distinct targets a Python dict
+    costs a dict object plus boxed str per field per row (tens of GB), while the same data as
+    contiguous Arrow string arrays is a few GB. Rows are streamed and filtered so only
+    referenced ones are ever materialized.
     """
-    out = {}
+    parts = []
     for src in sources:
         pf = pq.ParquetFile(norm_path(split, src))
         for rb in pf.iter_batches(batch_size=250_000, columns=REC_COLS):
-            eids = rb.column("entity_id").to_pylist()
-            hit = [i for i, e in enumerate(eids) if e in ids]
-            if not hit:
-                continue
-            cols = {c: rb.column(c).take(pa.array(hit)).to_pylist() for c in REC_COLS}
-            for j, i in enumerate(hit):
-                out[eids[i]] = {c: cols[c][j] for c in REC_COLS}
-    return out
+            sel = rb.filter(pc.is_in(rb.column("entity_id"), value_set=ids))
+            if sel.num_rows:
+                parts.append(sel)
+    if not parts:
+        raise ValueError(f"no rows matched in {split}/{sources}")
+    return pa.Table.from_batches(parts)
 
 
-def gather(recs: dict, ids: list, col: str, default=""):
-    """Column `col` for each id, with `default` when the id is absent (should not happen)."""
-    return [recs[i][col] if i in recs else default for i in ids]
+def positions(tbl: pa.Table, ids: pa.Array) -> pa.Array:
+    """Row position in `tbl` for each id, computed once for the whole candidate list.
+
+    pc.index_in builds its hash table in C++ and returns an int32 array, so the lookup for 40M
+    pairs costs ~160 MB instead of a 40M-entry Python dict.
+    """
+    pos = pc.index_in(ids, value_set=tbl.column("entity_id"))
+    if pos.null_count:
+        raise ValueError(f"{pos.null_count:,} candidate ids missing from the normalized sources")
+    return pos
+
+
+def columns_of(tbl: pa.Table, pos: pa.Array) -> dict:
+    """Aligned column -> python list for one batch of rows (batch-sized, not corpus-sized)."""
+    rows = tbl.take(pos)
+    return {c: rows.column(c).to_pylist() for c in REC_COLS}
 
 
 # ---------------------------------------------------------------- similarity helpers
@@ -122,16 +153,55 @@ def token_stats(a: list, b: list) -> tuple:
     return agree, conflict, missing
 
 
-def fit_addr_tfidf(texts_norm: list, texts_phon: list, cache=True) -> tuple:
-    """Fit (or load) the two char-3gram address vectorizers shared by train and test."""
+def corpus_sources() -> list:
+    """Every normalized (split, source) parquet that currently exists."""
+    return [(sp, sr) for sp in ("train", "test") for sr in ("S1", "S2", "S3")
+            if norm_path(sp, sr).exists()]
+
+
+def fit_addr_tfidf(per_source: int = 100_000, cache: bool = True) -> tuple:
+    """Fit (or load) the two char-3gram address vectorizers, sampled across the whole corpus.
+
+    Fitted on every normalized parquet present, not on the candidate set: test carries French
+    addresses that appear in no training candidate, and a vocabulary fitted on train-only text
+    gives those rows an all-zero vector, i.e. a silently dead feature on ~15% of the test set.
+    Using the provided test corpus is allowed (it is not external data).
+
+    The cache records the sources it saw, so a vectorizer fitted before the test parquets
+    existed is reported rather than reused blindly.
+    """
     path = ART / "addr_tfidf.joblib"
+    have = corpus_sources()
     if cache and path.exists():
-        return joblib.load(path)
-    vecs = (TfidfVectorizer(**TFIDF_PARAMS).fit([t for t in texts_norm if t]),
-            TfidfVectorizer(**TFIDF_PARAMS).fit([t for t in texts_phon if t]))
+        blob = joblib.load(path)
+        if isinstance(blob, dict):
+            missing = [s for s in have if s not in blob.get("sources", [])]
+            if missing:
+                print(f"  WARNING: cached address TF-IDF was fitted without {missing}; "
+                      f"delete {path} to refit (France would have no vocabulary)",
+                      file=sys.stderr, flush=True)
+            return blob["vecs"]
+        print(f"  WARNING: {path} predates source tracking; delete it to refit",
+              file=sys.stderr, flush=True)
+        return blob
+
+    rng = np.random.default_rng(SEED)
+    texts = {"addr_norm": [], "addr_phon": []}
+    for sp, sr in have:
+        for col in texts:
+            arr = pq.read_table(norm_path(sp, sr), columns=[col]).column(col)
+            n = len(arr)
+            take = min(per_source, n)
+            idx = np.sort(rng.choice(n, size=take, replace=False)) if take < n else np.arange(n)
+            texts[col].extend(v for v in arr.take(pa.array(idx)).to_pylist() if v)
+            del arr
+    print(f"  fitted address TF-IDF on {len(have)} sources "
+          f"({len(texts['addr_norm']):,} sampled addresses)", file=sys.stderr, flush=True)
+    vecs = (TfidfVectorizer(**TFIDF_PARAMS).fit(texts["addr_norm"]),
+            TfidfVectorizer(**TFIDF_PARAMS).fit(texts["addr_phon"]))
     if cache:
         ART.mkdir(exist_ok=True)
-        joblib.dump(vecs, path)
+        joblib.dump({"vecs": vecs, "sources": have}, path)
     return vecs
 
 
@@ -142,102 +212,184 @@ def cosine_rows(vec, a: list, b: list) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- feature block
-def features_for(s1_ids: list, cand_ids: list, recs: dict, vecs: tuple) -> dict:
-    """All 31 features for one batch of pairs, as name -> float32 array."""
+def features_for(a: dict, b: dict, vecs: tuple) -> dict:
+    """The 31 record-comparison features for one batch.
+
+    `a` and `b` are aligned column -> list mappings for the S1 side and the candidate side
+    (see columns_of); row i of `a` is compared with row i of `b`.
+    """
     f = {}
+    n = len(a["entity_id"])
     for field in NAME_FIELDS:
-        a, b = gather(recs, s1_ids, field), gather(recs, cand_ids, field)
         for tag, scorer in NAME_SCORERS:
-            f[f"{field}_{tag}"] = sim(a, b, scorer)
+            f[f"{field}_{tag}"] = sim(a[field], b[field], scorer)
 
     # acronym: S1's acronym against the candidate's acronym and its whitespace-free core,
-    # which catches "IAG" stored as a single-token business name.
-    acr_a = gather(recs, s1_ids, "name_acronym")
-    acr_b = gather(recs, cand_ids, "name_acronym")
-    core_b = [c.replace(" ", "") for c in gather(recs, cand_ids, "name_core")]
-    core_a = [c.replace(" ", "") for c in gather(recs, s1_ids, "name_core")]
+    # which catches "IAG" stored as a single-token business name, and the reverse direction.
+    acr_a, acr_b = a["name_acronym"], b["name_acronym"]
+    core_a, core_b = a["name_core"], b["name_core"]
+    ca = [c.replace(" ", "") for c in core_a]
+    cb = [c.replace(" ", "") for c in core_b]
     f["acronym_match"] = np.fromiter(
-        (float((bool(a) and (a == b or a == cb)) or (bool(b) and b == ca))
-         for a, b, ca, cb in zip(acr_a, acr_b, core_a, core_b)),
-        np.float32, len(s1_ids))
+        (float((bool(x) and (x == y or x == v)) or (bool(y) and y == u))
+         for x, y, u, v in zip(acr_a, acr_b, ca, cb)), np.float32, n)
 
     # best alternate-name (dba / fka) match, in both directions
-    alt_b = gather(recs, cand_ids, "name_alt_core")
-    alt_a = gather(recs, s1_ids, "name_alt_core")
-    core_s1 = gather(recs, s1_ids, "name_core")
-    core_cd = gather(recs, cand_ids, "name_core")
-    f["name_alt_token_set"] = np.maximum(sim(core_s1, alt_b, fuzz.token_set_ratio),
-                                         sim(alt_a, core_cd, fuzz.token_set_ratio))
-    f["name_missing"] = np.fromiter(((not x) or (not y) for x, y in zip(core_s1, core_cd)),
-                                    np.float32, len(s1_ids))
+    f["name_alt_token_set"] = np.maximum(
+        sim(core_a, b["name_alt_core"], fuzz.token_set_ratio),
+        sim(a["name_alt_core"], core_b, fuzz.token_set_ratio))
+    f["name_missing"] = np.fromiter(((not x) or (not y) for x, y in zip(core_a, core_b)),
+                                    np.float32, n)
 
-    an, bn = gather(recs, s1_ids, "addr_norm"), gather(recs, cand_ids, "addr_norm")
-    ap, bp = gather(recs, s1_ids, "addr_phon"), gather(recs, cand_ids, "addr_phon")
+    an, bn = a["addr_norm"], b["addr_norm"]
+    ap, bp = a["addr_phon"], b["addr_phon"]
     f["addr_norm_token_set"] = sim(an, bn, fuzz.token_set_ratio)
     f["addr_phon_token_set"] = sim(ap, bp, fuzz.token_set_ratio)
     f["addr_norm_tfidf"] = cosine_rows(vecs[0], an, bn)
     f["addr_phon_tfidf"] = cosine_rows(vecs[1], ap, bp)
 
-    f["num_agree"], f["num_conflict"], f["num_missing"] = token_stats(
-        gather(recs, s1_ids, "addr_nums"), gather(recs, cand_ids, "addr_nums"))
-    f["postal_agree"], f["postal_conflict"], f["postal_missing"] = token_stats(
-        gather(recs, s1_ids, "addr_postal"), gather(recs, cand_ids, "addr_postal"))
+    f["num_agree"], f["num_conflict"], f["num_missing"] = token_stats(a["addr_nums"],
+                                                                      b["addr_nums"])
+    f["postal_agree"], f["postal_conflict"], f["postal_missing"] = token_stats(a["addr_postal"],
+                                                                               b["addr_postal"])
 
-    f["addr_blank"] = np.fromiter(
-        (float(x or y) for x, y in zip(gather(recs, s1_ids, "addr_blank", False),
-                                       gather(recs, cand_ids, "addr_blank", False))),
-        np.float32, len(s1_ids))
-    f["was_non_latin"] = np.fromiter(
-        (float(x or y) for x, y in zip(gather(recs, cand_ids, "name_non_latin", False),
-                                       gather(recs, cand_ids, "addr_non_latin", False))),
-        np.float32, len(s1_ids))
-    f["is_s3"] = np.fromiter((float(c.startswith("S3-")) for c in cand_ids),
-                             np.float32, len(s1_ids))
+    f["addr_blank"] = np.fromiter((float(x or y) for x, y in zip(a["addr_blank"],
+                                                                 b["addr_blank"])), np.float32, n)
+    f["was_non_latin"] = np.fromiter((float(x or y) for x, y in zip(b["name_non_latin"],
+                                                                    b["addr_non_latin"])),
+                                     np.float32, n)
+    f["is_s3"] = np.fromiter((float(c.startswith("S3-")) for c in b["entity_id"]), np.float32, n)
     return f
 
 
-FEATURE_NAMES = ([f"{fl}_{tag}" for fl in NAME_FIELDS for tag, _ in NAME_SCORERS]
+BASE_FEATURES = ([f"{fl}_{tag}" for fl in NAME_FIELDS for tag, _ in NAME_SCORERS]
                  + ["acronym_match", "name_alt_token_set", "name_missing",
                     "addr_norm_token_set", "addr_phon_token_set",
                     "addr_norm_tfidf", "addr_phon_tfidf",
                     "num_agree", "num_conflict", "num_missing",
                     "postal_agree", "postal_conflict", "postal_missing",
                     "addr_blank", "was_non_latin", "is_s3"])
+CHANNELS = ("A", "P", "B", "C")
+RETRIEVAL_FEATURES = ([f"ch_{c}" for c in CHANNELS]
+                      + ["n_channels", "retr_score", "retr_rank", "rank_frac", "cand_count",
+                         "score_gap_best", "score_ratio_best",
+                         "rev_rank", "rev_count", "rev_score_gap"])
+FEATURE_NAMES = BASE_FEATURES          # retained for callers that predate the retrieval block
+PASSTHROUGH = ("s1_id", "cand_id", "label", "neg_kind")
 
 
-def build(cand_path, split: str = "train", batch: int = 500_000) -> pa.Table:
-    """Features for every pair in the candidate parquet, batched."""
-    cand = pq.read_table(cand_path)
-    n = cand.num_rows
-    s1_all, cd_all = cand["s1_id"].to_pylist(), cand["cand_id"].to_pylist()
+def feature_columns(tbl: pa.Table) -> list:
+    """The model-input columns of a feature table, in order.
 
-    with timed(f"load referenced records ({n:,} pairs)"):
-        recs = load_records(set(s1_all), split, ("S1",))
-        recs.update(load_records(set(cd_all), split, ("S2", "S3")))
-    print(f"  {len(recs):,} normalized rows held", file=sys.stderr, flush=True)
+    The contract for train/predict. Selecting "numeric columns" instead would silently keep
+    `label` (int8) and train the model on its own answer.
+    """
+    return [c for c in tbl.column_names if c not in PASSTHROUGH]
+
+
+def collapse(cand: pa.Table) -> "pd.DataFrame":
+    """One row per distinct (s1_id, cand_id), with retrieval/competition columns when available.
+
+    blocking.py emits a row per (pair, channel); this folds them into score = max, rank = min and
+    one flag per channel, then derives the within-S1 (how this candidate compares with the S1's
+    other candidates) and cross-S1 (how many other S1s want this same target, and how strongly)
+    signals. Those are what let the model reason about competition rather than each pair alone.
+    """
+    import pandas as pd
+    df = cand.to_pandas()
+    has_retr = {"score", "rank"}.issubset(df.columns)
+    keys = ["s1_id", "cand_id"]
+    if not has_retr:
+        return df.drop_duplicates(keys).reset_index(drop=True)
+
+    agg = df.groupby(keys, sort=False).agg(retr_score=("score", "max"),
+                                           retr_rank=("rank", "min")).reset_index()
+    if "channel" in df.columns:
+        ch = df[[*keys, "channel"]].copy()
+        ch["channel"] = ch["channel"].astype(str)
+        ch = ch.drop_duplicates()
+        bit = {c: 1 << i for i, c in enumerate(CHANNELS)}
+        ch["_b"] = ch["channel"].map(bit).fillna(0).astype(np.int16)
+        # each channel appears at most once per pair after the dedupe, so sum == bitwise or
+        bits = ch.groupby(keys, sort=False)["_b"].sum().reset_index()
+        agg = agg.merge(bits, on=keys, how="left")
+        agg["_b"] = agg["_b"].fillna(0).astype(np.int16)
+    else:
+        agg["_b"] = np.int16(0)
+    b = agg["_b"].to_numpy()          # pandas Series has no >> operator; numpy does
+    for i, c in enumerate(CHANNELS):
+        agg[f"ch_{c}"] = np.right_shift(b, i).astype(np.int16) & np.int16(1)
+        agg[f"ch_{c}"] = agg[f"ch_{c}"].astype(np.float32)
+    agg["n_channels"] = agg[[f"ch_{c}" for c in CHANNELS]].sum(axis=1).astype(np.float32)
+    agg = agg.drop(columns="_b")
+
+    # within the S1's own candidate list
+    g1 = agg.groupby("s1_id")["retr_score"]
+    best = g1.transform("max")
+    agg["cand_count"] = agg.groupby("s1_id")["s1_id"].transform("size").astype(np.float32)
+    agg["score_gap_best"] = (best - agg["retr_score"]).astype(np.float32)
+    agg["score_ratio_best"] = np.where(best > 0, agg["retr_score"] / best, 0.0).astype(np.float32)
+    agg["rank_frac"] = (agg["retr_rank"] / agg["cand_count"].clip(lower=1)).astype(np.float32)
+
+    # competition: the same target is usually reachable from several S1s, but may belong to one
+    gc = agg.groupby("cand_id")["retr_score"]
+    agg["rev_rank"] = (gc.rank(ascending=False, method="min") - 1).astype(np.float32)
+    agg["rev_count"] = agg.groupby("cand_id")["cand_id"].transform("size").astype(np.float32)
+    agg["rev_score_gap"] = (gc.transform("max") - agg["retr_score"]).astype(np.float32)
+
+    agg["retr_score"] = agg["retr_score"].astype(np.float32)
+    agg["retr_rank"] = agg["retr_rank"].astype(np.float32)
+
+    extra = [c for c in cand.column_names if c in ("label", "neg_kind")]
+    if extra:
+        agg = agg.merge(df[[*keys, *extra]].drop_duplicates(keys), on=keys, how="left")
+    return agg
+
+
+def build(cand_path, split: str = "train", batch: int = 500_000) -> tuple:
+    """Features for every distinct pair in the candidate parquet, batched."""
+    import pandas as pd
+    raw = pq.read_table(cand_path)
+    with timed(f"collapse candidates ({raw.num_rows:,} rows)"):
+        df = collapse(raw)
+    retr = [c for c in RETRIEVAL_FEATURES if c in df.columns]
+    n = len(df)
+    print(f"  {n:,} distinct pairs; retrieval features: "
+          f"{'yes' if retr else 'no (candidate file has no score/rank)'}",
+          file=sys.stderr, flush=True)
+
+    s1_ids = pa.array(df["s1_id"].to_numpy(), type=pa.string())
+    cd_ids = pa.array(df["cand_id"].to_numpy(), type=pa.string())
+
+    with timed("load referenced records"):
+        s1_tbl = load_records(pa.array(pd.unique(df["s1_id"]), type=pa.string()), split, ("S1",))
+        cd_tbl = load_records(pa.array(pd.unique(df["cand_id"]), type=pa.string()),
+                              split, ("S2", "S3"))
+        s1_pos, cd_pos = positions(s1_tbl, s1_ids), positions(cd_tbl, cd_ids)
+    print(f"  {s1_tbl.num_rows:,} S1 + {cd_tbl.num_rows:,} candidate rows held "
+          f"(peak RAM {peak_ram_gb():.1f} GB)", file=sys.stderr, flush=True)
 
     with timed("fit/load address TF-IDF"):
-        rng = np.random.default_rng(SEED)
-        keys = list(recs)
-        pick = [keys[i] for i in rng.permutation(len(keys))[:200_000]]
-        vecs = fit_addr_tfidf([recs[k]["addr_norm"] for k in pick],
-                              [recs[k]["addr_phon"] for k in pick])
+        vecs = fit_addr_tfidf()
 
     chunks, t0 = [], time.perf_counter()
     for start in range(0, n, batch):
         end = min(start + batch, n)
-        f = features_for(s1_all[start:end], cd_all[start:end], recs, vecs)
+        sl = slice(start, end)
+        f = features_for(columns_of(s1_tbl, s1_pos[sl]), columns_of(cd_tbl, cd_pos[sl]), vecs)
         chunks.append(pa.table({k: pa.array(v) for k, v in f.items()}))
-        print(f"  features {end:,}/{n:,} ({(end)/(time.perf_counter()-t0):,.0f} pairs/s)",
+        print(f"  features {end:,}/{n:,} ({end / (time.perf_counter() - t0):,.0f} pairs/s)",
               file=sys.stderr, flush=True)
     feats = pa.concat_tables(chunks)
 
-    out = {"s1_id": cand["s1_id"], "cand_id": cand["cand_id"]}
-    for passthru in ("label", "neg_kind"):     # carried for the model/eval stages
-        if passthru in cand.column_names:
-            out[passthru] = cand[passthru]
-    for name in FEATURE_NAMES:
+    out = {"s1_id": s1_ids, "cand_id": cd_ids}
+    for col in ("label", "neg_kind"):
+        if col in df.columns:
+            out[col] = pa.array(df[col].to_numpy())
+    for name in BASE_FEATURES:
         out[name] = feats[name]
+    for name in retr:
+        out[name] = pa.array(df[name].to_numpy(np.float32))
     return pa.table(out), time.perf_counter() - t0
 
 
@@ -250,11 +402,12 @@ def report(tbl: pa.Table, elapsed: float) -> None:
           f"   (peak RAM {peak_ram_gb():.1f} GB)\n")
     if "label" not in tbl.column_names:
         return
+    names = feature_columns(tbl)
     lab = np.asarray(tbl["label"])
     pos, neg = lab == 1, lab == 0
     print(f"feature means by label ({int(pos.sum()):,} positive / {int(neg.sum()):,} negative)")
     print(f"{'feature':<26}{'label=1':>10}{'label=0':>10}{'gap':>10}")
-    for name in FEATURE_NAMES:
+    for name in names:
         v = np.asarray(tbl[name], dtype=np.float32)
         mp, mn = float(v[pos].mean()) if pos.any() else 0.0, float(v[neg].mean()) if neg.any() else 0.0
         print(f"{name:<26}{mp:>10.3f}{mn:>10.3f}{mp - mn:>+10.3f}")
@@ -273,7 +426,7 @@ def main() -> None:
     tbl, elapsed = build(args.candidates, args.split, args.batch)
     out = args.out or str(args.candidates).replace(".parquet", "_features.parquet")
     pq.write_table(tbl, out, compression="zstd")
-    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(FEATURE_NAMES)} features")
+    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(feature_columns(tbl))} features")
     if args.report:
         report(tbl, elapsed)
 
