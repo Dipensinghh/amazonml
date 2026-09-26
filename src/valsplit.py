@@ -26,3 +26,14 @@ def load_val_ids(split_path: Path = ART / "split_train.parquet") -> set:
         return set(val.tolist())
     t = pq.read_table(split_path).to_pandas()
     return set(t.loc[t["is_val"], "entity_id"])
+
+
+def sample_val_scope(n: int = 50_000) -> set:
+    """The S1s blocking evaluated: blocking.sample_ids on the sorted validation ids (seed 42, n draws).
+
+    Includes S1s that ended up with zero candidates, so macro F0.5 counts them.
+    """
+    ids = np.sort(np.array(sorted(load_val_ids())))
+    if n <= 0 or n >= len(ids):
+        return set(ids.tolist())
+    return set(np.sort(np.random.default_rng(SEED).choice(ids, size=n, replace=False)).tolist())

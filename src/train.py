@@ -32,11 +32,21 @@ def gold_sizes(gt_path: str) -> pd.Series:
     return pd.Series(n.values, index=gt["source1_entity_id"].values, name="ngold")
 
 
-def attach_labels(feats: pd.DataFrame, gt_path: str) -> pd.DataFrame:
-    """Add y=1 for pairs in the ground truth, 0 otherwise (recomputed from the GT, even if a `label` column exists)."""
-    gold = load_gold_pairs(gt_path)
-    df = feats.merge(gold, on=["s1_id", "cand_id"], how="left")
-    df["y"] = df["y"].fillna(0).astype("int8")
+def attach_labels(feats: pd.DataFrame, gt_path: str = None) -> pd.DataFrame:
+    """Set y from B's `label` column when present (built from the ground truth), else from the GT file.
+
+    Also asserts one row per (s1_id, cand_id), since duplicate pairs would double-count in scoring.
+    """
+    df = feats
+    key = pd.util.hash_pandas_object(df[["s1_id", "cand_id"]], index=False)
+    if key.duplicated().any():
+        raise ValueError("duplicate (s1_id, cand_id) rows: collapse the candidates first")
+    if "label" in df.columns:
+        df = df.assign(y=df["label"].astype("int8"))
+    else:
+        gold = load_gold_pairs(gt_path)
+        df = df.merge(gold, on=["s1_id", "cand_id"], how="left")
+        df["y"] = df["y"].fillna(0).astype("int8")
     return df
 
 
@@ -86,6 +96,8 @@ def train(df: pd.DataFrame, val_ids: set, gt_path: str, out_dir: str = "artifact
     sizes = gold_sizes(gt_path)
     scope = set(scope_ids) if scope_ids is not None else set(va["s1_id"])
     sizes = sizes[sizes.index.isin(scope & set(val_ids))]
+    n_zero = int((~sizes.index.isin(va["s1_id"].unique())).sum())
+    print(f"evaluating {len(sizes):,} val S1s; {n_zero:,} have no candidates and count as empty predictions", flush=True)
     res = sweep_threshold(va, sizes)
     res["ownership"] = ownership_report(va, sizes, res["t"])
     res["all_empty_baseline"] = float((sizes == 0).mean())
@@ -118,18 +130,26 @@ def refit_full(df: pd.DataFrame, bundle_path: str = "artifacts/bundle.json", out
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--features", required=True, help="parquet: s1_id, cand_id, feature columns (from features.py)")
+    ap.add_argument("--features", required=True, help="fitting-side feature parquet (features.py output)")
+    ap.add_argument("--extra-features", nargs="*", default=[], help="validation-side feature parquet(s) to concatenate")
     ap.add_argument("--gt", default=str(GT_PATH))
     ap.add_argument("--out-dir", default="artifacts")
     ap.add_argument("--fit-s1-frac", type=float, default=1.0)
-    ap.add_argument("--scope-ids", help="text file of the S1 ids evaluated (one per line); default: val S1s present in the data")
-    ap.add_argument("--extra-features", nargs="*", default=[], help="more feature parquets to concatenate (e.g. validation-side pairs)")
+    ap.add_argument("--scope-ids", help="text file of the S1 ids evaluated (one per line)")
+    ap.add_argument("--scope-sample", type=int, default=0,
+                    help="evaluate exactly blocking's validation sample of this many S1s (e.g. 50000); zero-candidate S1s count")
     ap.add_argument("--refit-full", action="store_true", help="after training, refit on all labelled S1s with the best iteration")
     a = ap.parse_args()
     feats = pd.concat([pd.read_parquet(f) for f in [a.features, *a.extra_features]], ignore_index=True)
-    feats = feats.drop_duplicates(["s1_id", "cand_id"])
     df = attach_labels(feats, a.gt)
-    scope = {l.strip() for l in open(a.scope_ids)} if a.scope_ids else None
+    del feats
+    if a.scope_ids:
+        scope = {l.strip() for l in open(a.scope_ids) if l.strip()}
+    elif a.scope_sample:
+        from valsplit import sample_val_scope
+        scope = sample_val_scope(a.scope_sample)
+    else:
+        scope = None
     train(df, load_val_ids(), a.gt, a.out_dir, a.fit_s1_frac, scope_ids=scope)
     if a.refit_full:
         refit_full(df, f"{a.out_dir}/bundle.json", a.out_dir)
