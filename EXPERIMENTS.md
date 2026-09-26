@@ -78,3 +78,49 @@ ranking, targeting A+B-level recall at a fraction of the cost.
 
 Earlier attempt (blocking v1, full 441k val, sparse_dot_topn threads): stopped after 45 min;
 India/S2/A alone took 1162 s (152 q/s).
+
+---
+
+## 2026-09-27 — Stage 2: blocking v3, rare-token pairs (`src/blocking.py`) — FROZEN
+
+Replaces the A/P/B/C trigram search. Per country × source:
+- tokens (hashed, 2^26 buckets): address letter/digit runs (leading zeros stripped), number
+  prefixes truncated by one digit ("1125"→"112#": house numbers are perturbed), and all
+  unordered pairs of non-common address words/numbers (common = df > 1% of targets);
+  name words, unordered name-word pairs, concatenated name (+ web affixes stripped).
+- drop tokens with target df > cap; score = Σ IDF over shared kept tokens (address 1.0,
+  name 0.5) via one sparse matmul (weighted query × binary target), top-30 pool per source.
+- blank-address targets get their own small name-only index, quota KB = 2 per source.
+- rerank the pool by score + α·token_set_ratio/100 (max over name_core / name_phon; pairs only).
+
+Diagnosis that drove it: single words are too common (street/city df 100–5000, numbers
+perturbed); pairs are near-unique. Before the blank-address index, 53% of US / 23% of India
+misses were blank-address targets. Phonetic tokens for everything were worse (0.894 vs 0.911 @ 20
+on 2k) — collisions outweigh transliteration gains.
+
+50k val sample, overall recall @ avg cands/S1 (K per source + up to 2 blank per source):
+
+| cap | α | K=5 | K=10 | K=15 |
+|---:|---:|---|---|---|
+| 200 | 0 | 0.8955 @ 13.7 | 0.9214 @ 23.7 | 0.9315 @ 33.6 |
+| 200 | 3 | 0.9060 @ 13.7 | 0.9277 @ 23.7 | 0.9363 @ 33.6 |
+| 200 | 6 | 0.9082 @ 13.7 | **0.9293 @ 23.7** | 0.9373 @ 33.6 |
+| 500 | 6 | 0.9073 @ 13.9 | 0.9286 @ 23.9 | 0.9365 @ 33.9 |
+| 2000 | 6 | 0.9069 @ 14.0 | 0.9287 @ 24.0 | 0.9364 @ 33.9 |
+
+Per country at the frozen config (cap 200, α 6, K 10): India 0.8806, US 0.9621 @ ~23.7.
+Pool ceiling (30/source): 0.9475 @ 69.3. Cap barely matters; 200 is best and cheapest.
+
+Runtime on 50k: 231 s total for 3 caps (target-side fixed 115 s; query+sim ~20 s per cap,
+~10k q/s); peak RAM 7.1 GB. Extrapolated full test: **~12 min** (vs ~22 h for v2).
+
+**Frozen:** cap 200, α 6, K 10, KB 2 → recall 0.929 @ 23.7 cands/S1.
+Candidate files (schema: s1_id, cand_id, source, blank_addr_index, tok_score, name_sim, final_rank):
+- `artifacts/cand_val50k.parquet` — from the eval pool; recall 0.9293 @ 23.67.
+- `artifacts/cand_fit200k.parquet` — 200k non-val train S1 (seed 42); recall 0.9306 @ 23.66; 205 s.
+- `artifacts/cand_test.parquet` — all 1,732,544 test S1: 40.7M pairs, 23.49 cands/S1
+  (France 22.68, India 23.53, US 23.76); 1 S1 with no candidates; no duplicates.
+  **Actual runtime 471 s (7.9 min)**, peak RAM 7.4 GB — France handled with no country-specific code.
+
+Open: India lags (0.881). Next idea: phonetic tokens only for non-Latin target rows (separate
+small index) queried with S1 phonetic tokens, unioned into the pool.
