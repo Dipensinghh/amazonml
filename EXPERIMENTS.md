@@ -1,15 +1,146 @@
 # Experiments
 
-One row per run. Metrics per `CLAUDE_v2.md`: blocking recall ceiling, avg candidates per S1,
-validation macro F0.5 (overall + per country), wall-clock runtime. Validation = held-out 20% of
-train S1 ids (seed 42), searched against ALL train S2/S3 so distractors stay in.
+Validation protocol: 20% of train S1 ids held out (seed 42, `artifacts/split_train.parquet`).
+Blocking studies use a fixed random sample of 50,000 val S1s (seed 42) searched against ALL
+train S2/S3 rows of the same country (distractors kept). Recall = share of GT (S1, match)
+pairs present in the candidate set. Machine: 16 GB RAM, 20 logical CPUs, Windows.
 
-## Blocking
+---
 
-| date | config | recall @ k | avg cands/S1 | runtime | notes |
-|------|--------|-----------|--------------|---------|-------|
+## 2026-09-27 — Stage 1: normalization (`src/normalize.py`)
 
-## Features (B)
+- ftfy + NFKC + anyascii on distinct non-ASCII values only; the rest is vectorized in pyarrow.
+- Fields: name_norm / name_core (legal suffixes removed) / name_alt_core (after dba/fka/aka) /
+  name_acronym / name_sorted / name_phon; addr_norm / addr_phon / addr_nums / addr_postal.
+- Runtime all train (12.5M rows): ~8 min, peak RAM 3.9 GB.
+
+**Transliteration check** (551,240 matched pairs whose S2/S3 name is non-Latin = 18% of India pairs):
+the non-Latin names are *transliterations* of English business names into Indic scripts
+(परफेक्ट फूड्स → "prphekt phuds" = Perfect Foods), not translations. anyascii recovers the
+sound, but spelling drifts systematically (ph/f, soft g→j, anusvara m, dropped vowels,
+"praivet/piraivet limitet"). Added a script-agnostic phonetic skeleton `name_phon`.
+
+Mean rapidfuzz token_set_ratio, S1 vs matched S2/S3:
+
+| group | pairs | name_norm | name_core | ratio(core) | name_phon |
+|---|---:|---:|---:|---:|---:|
+| India non-Latin | 551,240 | 73.5 | 66.7 | 69.9 | **93.1** |
+| India Latin-Latin | 2,508,603 | 91.2 | 90.9 | 87.9 | 91.0 |
+| all Latin-Latin | 7,087,125 | 92.7 | 91.6 | 88.4 | 91.7 |
+
+Caveat: skeletons are shorter, so non-matches also score higher on name_phon — use it as an
+extra feature, not a replacement.
+
+---
+
+## 2026-09-27 — Stage 2: blocking v2 (`src/blocking.py`, 50k val sample)
+
+Channels per country × source: A = char_wb 3-gram TF-IDF on name_core (max_df 0.2);
+P = same on name_phon; B = word TF-IDF on addr_phon (max_df 0.1); C = exact acronym
+(bucket cap 10). Top-20 once per channel, k sliced. GT pairs crossing countries: **0.000%**
+(per-country blocking loses nothing).
+
+Recall @ avg candidates per S1 (S2+S3 combined; k = per source per channel), overall:
+
+| k | A | P | A+P | A+B | A+P+B | A+B+C | A+P+B+C |
+|---:|---|---|---|---|---|---|---|
+| 3 | 0.467 @ 6.0 | 0.427 @ 6.0 | 0.484 @ 7.8 | 0.858 @ 10.6 | 0.863 @ 12.3 | 0.858 @ 12.8 | 0.863 @ 14.5 |
+| 5 | 0.535 @ 10.0 | 0.494 @ 10.0 | 0.554 @ 13.5 | 0.914 @ 18.2 | 0.917 @ 21.7 | 0.914 @ 20.4 | 0.917 @ 23.9 |
+| 10 | 0.598 @ 20.0 | 0.556 @ 20.0 | 0.620 @ 28.5 | **0.943 @ 37.8** | 0.947 @ 46.2 | 0.943 @ 40.0 | 0.947 @ 48.4 |
+| 20 | 0.650 @ 40.0 | 0.603 @ 40.0 | 0.676 @ 59.2 | 0.960 @ 77.5 | 0.963 @ 96.7 | 0.960 @ 79.7 | 0.963 @ 98.8 |
+
+Per country (A+B): India 0.840 / 0.893 / 0.923 / 0.942 and US 0.871 / 0.927 / 0.957 / 0.972
+at k = 3 / 5 / 10 / 20.
+
+Channel contribution at k=20 (share of GT pairs found by that channel only):
+A 0.72%, P 0.32%, **B 28.67%**, C 0.002%; missed by all 3.71%.
+- B over A: +34.5 pp recall at k=10 (0.598 → 0.943) for +17.8 cands/S1.
+- C over A+B: ~0 (+0.0001) for +2.2 cands/S1 → drop C.
+- P over A+B: +0.3 pp at k=10 for +8.4 cands/S1.
+
+Timing (10 worker processes; sparse_dot_topn threading does not scale here: 122 q/s at 1
+thread vs 161 at 20; process pool is memory-bandwidth bound):
+
+| channel | fit | query (50k S1) | q/s | extrapolated full test (1.73M S1) |
+|---|---:|---:|---:|---:|
+| A | 112 s | 1148 s | 87 | ~665 min |
+| P | 73 s | 790 s | 127 | ~457 min |
+| B | 50 s | 328 s | 305 | ~190 min |
+| C | 6 s | – | – | ~0 min |
+
+Total runtime 2588 s, peak RAM 6.4 GB (main process).
+
+**Findings.** Names are weakly identifying in this data (many entities share near-identical
+names); the address is the main blocking signal. TF-IDF top-k via sparse matmul is far too
+slow for test (~22 h all channels). Next: cheaper candidate generation driven by rare
+address tokens (e.g. house number + street/locality keys) with name similarity used for
+ranking, targeting A+B-level recall at a fraction of the cost.
+
+Earlier attempt (blocking v1, full 441k val, sparse_dot_topn threads): stopped after 45 min;
+India/S2/A alone took 1162 s (152 q/s).
+
+---
+
+## 2026-09-27 — Stage 2: blocking v3, rare-token pairs (`src/blocking.py`) — FROZEN
+
+Replaces the A/P/B/C trigram search. Per country × source:
+- tokens (hashed, 2^26 buckets): address letter/digit runs (leading zeros stripped), number
+  prefixes truncated by one digit ("1125"→"112#": house numbers are perturbed), and all
+  unordered pairs of non-common address words/numbers (common = df > 1% of targets);
+  name words, unordered name-word pairs, concatenated name (+ web affixes stripped).
+- drop tokens with target df > cap; score = Σ IDF over shared kept tokens (address 1.0,
+  name 0.5) via one sparse matmul (weighted query × binary target), top-30 pool per source.
+- blank-address targets get their own small name-only index, quota KB = 2 per source.
+- rerank the pool by score + α·token_set_ratio/100 (max over name_core / name_phon; pairs only).
+
+Diagnosis that drove it: single words are too common (street/city df 100–5000, numbers
+perturbed); pairs are near-unique. Before the blank-address index, 53% of US / 23% of India
+misses were blank-address targets. Phonetic tokens for everything were worse (0.894 vs 0.911 @ 20
+on 2k) — collisions outweigh transliteration gains.
+
+50k val sample, overall recall @ avg cands/S1 (K per source + up to 2 blank per source):
+
+| cap | α | K=5 | K=10 | K=15 |
+|---:|---:|---|---|---|
+| 200 | 0 | 0.8955 @ 13.7 | 0.9214 @ 23.7 | 0.9315 @ 33.6 |
+| 200 | 3 | 0.9060 @ 13.7 | 0.9277 @ 23.7 | 0.9363 @ 33.6 |
+| 200 | 6 | 0.9082 @ 13.7 | **0.9293 @ 23.7** | 0.9373 @ 33.6 |
+| 500 | 6 | 0.9073 @ 13.9 | 0.9286 @ 23.9 | 0.9365 @ 33.9 |
+| 2000 | 6 | 0.9069 @ 14.0 | 0.9287 @ 24.0 | 0.9364 @ 33.9 |
+
+Per country at the frozen config (cap 200, α 6, K 10): India 0.8806, US 0.9621 @ ~23.7.
+Pool ceiling (30/source): 0.9475 @ 69.3. Cap barely matters; 200 is best and cheapest.
+
+Runtime on 50k: 231 s total for 3 caps (target-side fixed 115 s; query+sim ~20 s per cap,
+~10k q/s); peak RAM 7.1 GB. Extrapolated full test: **~12 min** (vs ~22 h for v2).
+
+**Frozen:** cap 200, α 6, K 10, KB 2 → recall 0.929 @ 23.7 cands/S1.
+Candidate files (schema: s1_id, cand_id, source, blank_addr_index, tok_score, name_sim, final_rank):
+- `artifacts/cand_val50k.parquet` — from the eval pool; recall 0.9293 @ 23.67.
+- `artifacts/cand_fit200k.parquet` — 200k non-val train S1 (seed 42); recall 0.9306 @ 23.66; 205 s.
+- `artifacts/cand_test.parquet` — all 1,732,544 test S1: 40.7M pairs, 23.49 cands/S1
+  (France 22.68, India 23.53, US 23.76); 1 S1 with no candidates; no duplicates.
+  **Actual runtime 471 s (7.9 min)**, peak RAM 7.4 GB — France handled with no country-specific code.
+
+### Experiment: non-Latin phonetic index (`--nl-index`, off in the frozen config)
+
+Separate index per country × source over target rows whose original name or address was
+non-Latin, tokenized from addr_phon/name_phon, queried with S1 phonetic tokens; quota KN = 2
+per source, deduped against the main pool. India targets flagged: S2 836k / S3 686k (~40%,
+mixed-script addresses count), so the index is not small.
+
+| config (cap 200, α 6, K 10) | India | overall | test time |
+|---|---|---|---|
+| frozen | 0.8806 @ 23.5 | 0.9293 @ 23.7 | ~12 min est. / 7.9 min actual |
+| + nl-index | 0.8836 @ 24.8 | 0.9305 @ 24.2 | ~18 min est. |
+
++0.3 pp India / +0.1 pp overall for +0.5 cands/S1 — marginal; not adopted yet.
+Also noted: K=5, α 6 with nl-index gives 0.9106 @ 14.4 cands/S1 (≥ 0.91 with ~40% fewer
+candidates) — an option if candidate-set size weighs heavily in judging.
+(This run overwrote `artifacts/val_blocking_pool_cap200.parquet`; `cand_val50k.parquet` was
+built from the frozen-config pool before it.)
+
+## 2026-09-27 — Stage 3: features (`src/features.py`, `src/dev_candidates.py`) — B
 
 | date | config | pairs | throughput | 40M extrapolation | runtime | notes |
 |------|--------|-------|-----------|-------------------|---------|-------|
@@ -50,13 +181,3 @@ so it must not be used to pick a threshold.
   model is actually fitted on.
 - **`feature_columns(table)`** is now the train/predict column contract. "Numeric columns" is
   not a safe test: `label` is int8 and passes it.
-
-## Model
-
-| date | config | val F0.5 | US | India | France | threshold | runtime | notes |
-|------|--------|----------|----|-------|--------|-----------|---------|-------|
-
-## Submissions
-
-| date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
-|------|------------------|----------------|--------------|--------------|
