@@ -31,7 +31,7 @@ def gold_sizes(gt_path: str) -> pd.Series:
 
 
 def attach_labels(feats: pd.DataFrame, gt_path: str) -> pd.DataFrame:
-    """Add y=1 for pairs in the ground truth, 0 otherwise."""
+    """Add y=1 for pairs in the ground truth, 0 otherwise (recomputed from the GT, even if a `label` column exists)."""
     gold = load_gold_pairs(gt_path)
     df = feats.merge(gold, on=["s1_id", "cand_id"], how="left")
     df["y"] = df["y"].fillna(0).astype("int8")
@@ -39,8 +39,8 @@ def attach_labels(feats: pd.DataFrame, gt_path: str) -> pd.DataFrame:
 
 
 def feature_columns(df: pd.DataFrame) -> list:
-    """All non-meta columns; refuses country-like features."""
-    cols = [c for c in df.columns if c not in META]
+    """All numeric non-meta columns (keys, label, provenance excluded); refuses country-like features."""
+    cols = [c for c in df.columns if c not in META and pd.api.types.is_numeric_dtype(df[c])]
     bad = FORBIDDEN & set(cols)
     if bad:
         raise ValueError(f"forbidden feature columns: {bad}")
@@ -64,6 +64,9 @@ def train(df: pd.DataFrame, val_ids: set, gt_path: str, out_dir: str = "artifact
     cols = feature_columns(df)
     is_val = df["s1_id"].isin(val_ids)
     tr, va = df[~is_val], df[is_val].copy()
+    if tr.empty or va.empty:
+        raise ValueError(f"need pairs from BOTH fitting and validation S1s (fit={len(tr)}, val={len(va)}); "
+                         "a validation-only candidate set (e.g. dev_candidates) cannot train the model")
     if fit_s1_frac < 1.0:
         keep = tr["s1_id"].drop_duplicates().sample(frac=fit_s1_frac, random_state=42)
         tr = tr[tr["s1_id"].isin(set(keep))]
