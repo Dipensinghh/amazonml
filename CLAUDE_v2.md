@@ -1,8 +1,12 @@
 # Amazon ML Challenge 2026 — Business Entity Resolution
 
 ## Environment
-Windows + PowerShell. Use Python scripts, never bash one-liners (`&&`, `head`, `grep` fail).
-Write files with LF line endings via the Write tool, not shell edits.
+Linux (Fedora 43) + zsh. Python 3.14 in `.venv` — run everything as `.venv/bin/python -u src/<stage>.py`.
+Machine: 12 cores, 16 GB RAM, RTX 4050 (unused; pipeline is CPU-only). Shell one-liners are fine.
+Keep files LF (`.gitattributes` enforces it). The code is cross-platform and was first developed on
+Windows + PowerShell — don't reintroduce Windows-only assumptions (`peak_wset`, backslash paths).
+Setup on a fresh machine: `python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`,
+then `mkdir -p dataset/{train,test} artifacts output logs` and drop the organizer TSVs into `dataset/`.
 Deadline: **27 Sept 2026, 11:59 PM IST**. Max 5 leaderboard submissions/day.
 
 ## Task
