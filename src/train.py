@@ -40,11 +40,10 @@ def attach_labels(feats: pd.DataFrame, gt_path: str) -> pd.DataFrame:
 
 def feature_columns(df: pd.DataFrame) -> list:
     """All numeric non-meta columns (keys, label, provenance excluded); refuses country-like features."""
-    cols = [c for c in df.columns if c not in META and pd.api.types.is_numeric_dtype(df[c])]
-    bad = FORBIDDEN & set(cols)
+    bad = FORBIDDEN & set(df.columns)
     if bad:
         raise ValueError(f"forbidden feature columns: {bad}")
-    return cols
+    return [c for c in df.columns if c not in META and pd.api.types.is_numeric_dtype(df[c])]
 
 
 PARAMS = dict(objective="binary", n_estimators=800, learning_rate=0.05, num_leaves=31,
