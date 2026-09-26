@@ -1,0 +1,25 @@
+# data
+dataset/
+sample/
+artifacts/
+output/
+*.zip
+*.parquet
+*.tsv
+__MACOSX/
+.DS_Store
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# organizer materials: video, guidelines, emails, query-form responses
+*.pdf
+*.mp4
+# organizer files from the student_resource zip (kept locally, not published).
+# Remove the /README.md line once we write our own project README.
+/README.md
+/Documentation_template.md
+/utils/
