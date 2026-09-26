@@ -51,7 +51,7 @@ Blocking + classifier pipeline. Names and addresses are normalized and translite
 
 **Threshold selection method:** F0.5 optimization on the validation set, reported with and without ownership.
 
-**Rules-based fallback (E01) [measured]:** word-level TF-IDF retrieval (name and address, top-10 each) with a hand-weighted score `w*name_cos + (1-w)*addr_cos`, one tuned threshold and the same ownership rule. On 2,000 random validation S1s searched against all train S2/S3 of the same country: pair recall 0.930 at 37.9 candidates per S1; best name weight 0.2 (address-heavy), t = 0.73, **macro F0.5 = 0.662** (US 0.706, India 0.574) versus 0.056 for predicting no matches. Ownership changed the score by only +0.001 at this sample size (collision rate 0.2%), because 2,000 S1s give almost no competition for targets. This is the baseline the LightGBM model must beat on the same candidates.
+**Rules-based fallback, D sample version (E01) [measured]:** word-level TF-IDF retrieval (name and address, top-10 each) with a hand-weighted score `w*name_cos + (1-w)*addr_cos`, one tuned threshold and the same ownership rule. On 2,000 random validation S1s searched against all train S2/S3 of the same country: pair recall 0.930 at 37.9 candidates per S1; best name weight 0.2 (address-heavy), t = 0.73, **macro F0.5 = 0.662** (US 0.706, India 0.574) versus 0.056 for predicting no matches. Ownership changed the score by only +0.001 at this sample size (collision rate 0.2%), because 2,000 S1s give almost no competition for targets. A's fallback on the real frozen candidates (`cand_val50k`, 23.7 candidates per S1, recall ceiling 0.929) scored macro F0.5 **0.6561** with ownership versus **0.6049** without, so global ownership added +0.051 there. That is the baseline LightGBM must beat on the same candidates.
 
 ---
 
@@ -71,7 +71,7 @@ Blocking + classifier pipeline. Names and addresses are normalized and translite
 ---
 
 ## Appendix A: Code structure and reproduction
-`src/normalize.py` (normalization and transliteration), `src/blocking.py` (candidate generation), `src/features.py` (pair features), `src/evaluate.py` (exact macro F0.5, candidate diagnostics), `src/train.py` (labels, LightGBM, model bundle), `src/predict.py` (scoring, global ownership, threshold sweep, TSV writer), `src/fallback.py` (rules baseline), `src/valsplit.py` (shared split). Pinned environment in `requirements.txt`. **[pending: single entry point and run instructions]**
+`src/normalize.py` (normalization and transliteration), `src/blocking.py` (candidate generation), `src/features.py` (pair features), `src/evaluate.py` (exact macro F0.5, candidate diagnostics), `src/train.py` (labels, LightGBM, model bundle), `src/predict.py` (scoring, global ownership, threshold sweep, TSV writer), `src/fallback_sample.py` (D sample rules baseline; A owns `src/fallback.py`), `src/valsplit.py` (shared split). Pinned environment in `requirements.txt`. **[pending: single entry point and run instructions]**
 
 ## Appendix B: Provenance
 No external data, APIs, gazetteers or pretrained models are used. Libraries: scikit-learn, LightGBM, RapidFuzz, sparse_dot_topn, anyascii, ftfy, pyarrow, pandas. **[pending: final versions, runtime, hardware, hashes of the submitted outputs]**
