@@ -74,3 +74,33 @@ After Dipen merges D, D can score `cand_test_features.parquet`; A can then enfor
 write the two TSVs, and run both strict and organizer validators. Role C's normalized,
 retrieval, performance, and feature-handoff work is complete. If the final scoring run is moved
 to this Mac, Role C should verify exact scored/exported pair equality before giving A the paths.
+
+### A — integration and submission
+
+- Merge current `main`, `b-features`, `d-model`, and this branch; preserve main's frozen
+  `src/blocking.py`. The current test merge of `a-integration` with main is clean.
+- Copy the five production Parquets from this Mac and verify the SHA-256 values above; they are
+  intentionally Git-ignored.
+- After D returns scored pairs and the selected threshold, apply global target ownership, write
+  both TSVs, run `src/checks.py`, then run the organizer validator with `--check-ids`.
+- Complete the README, pinned requirements, methodology document, clean-room run, and ZIP.
+
+### B — feature contract
+
+- Get `b-features` (`b7cb2e9`) merged before D; it is the only team branch already based on the
+  current main blocker and it defines the 43-feature frozen-v3 contract used by the full artifact.
+- Give D the exact ordered feature list from `cand_test_features_audit.json` and keep that order
+  in the model bundle. No full test feature rerun is needed unless B changes feature logic.
+- If feature logic changes, version the output separately and rerun pair/order and finite-value
+  checks before replacing the audited artifact.
+
+### D — model, threshold, and scoring
+
+- Merge current main and B's latest `features.py`; resolve the expected add/add conflict in
+  `EXPERIMENTS.md` by retaining both experiment histories.
+- Train on `cand_fit200k` features, evaluate and tune the threshold on the exact `cand_val50k`
+  S1 scope with ownership enabled, then refit the selected LightGBM configuration on all allowed
+  labelled fitting data.
+- Score `cand_test_features.parquet` without changing row order or pair coverage. Return a score
+  artifact containing exactly `s1_id`, `cand_id`, and the model probability, plus the model,
+  bundle, threshold, and validation report for A.
