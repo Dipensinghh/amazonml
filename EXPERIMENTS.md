@@ -345,3 +345,20 @@ validator passed with `--check-ids`.
 The full test feature `rev_*` columns were also independently recomputed for 100 contested
 targets (5,263 rows across 3,514 S1s); rank, contender count, and score gap matched exactly,
 confirming that competition was computed globally before feature batching.
+
+## 2026-09-27 — Whole-population competition block (trainall)
+
+`src/competition.py` ran `features.collapse` (FROZEN alpha 6.0) over all of `cand_trainall`
+(52.2M pairs, 2.21M S1s, 9.71M candidates) with int32-coded ids, partitioned by cand_id into
+4 buckets (exact, since rev_* depend only on the cand_id group; checked against a direct
+`collapse` call on 300k rows). Runtime 82 s, peak RAM 4.4 GB → `artifacts/competition_trainall.parquet`.
+
+On the 4.73M cand_fit200k rows (all found in trainall), sample-level vs whole-population values:
+
+| label | n | rev_count sample | rev_count full | rev_rank sample | rev_rank full |
+|---|---|---|---|---|---|
+| 0 | 4,088,221 | 13.16 | 135.70 | 5.62 | 62.20 |
+| 1 | 644,258 | 1.42 | 5.62 | 0.002 | 0.025 |
+
+rev_rank==0 share: label 0 0.685 → 0.101, label 1 0.998 → 0.991. The fit200k features
+understate competition by ~10x, so train on these full values when rev_* features are used.
