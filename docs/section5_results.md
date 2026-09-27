@@ -93,6 +93,20 @@ rates (3.46 matches, 5.6% singletons), which suggests the model is not collapsin
 | num_leaves=127, up to 3000 trees | 40 | 0.9323 | 0.71 | 3.017 | 2572 (early stop) |
 | num_leaves=255, up to 3000 trees (= v2q) | 40 | 0.9326 | 0.70 | 3.028 | 1648 (early stop) |
 
+**Threshold probes on the public leaderboard.** The threshold is tuned on validation (0.70 for both
+reverse-retrieval models). To check that it transfers to the test distribution, v4r's test scores were
+re-thresholded at 0.62 and 0.78 with no retraining; only the threshold differs from Submission 4. The
+rule set in advance: move off 0.70 only if a probe beats it by more than about 0.0005, and probe no
+further, to avoid fitting the public subset.
+
+| v4r threshold | matches per S1 | empty S1s | public F0.5 |
+|---|---|---|---|
+| 0.62 | 3.277 | 5.96% | _pending_ |
+| 0.70 (validation-tuned) | 3.232 | 6.14% | 0.9421 |
+| 0.78 | 3.181 | 6.37% | _pending_ |
+
+Final threshold: _pending_.
+
 **Fewer candidates (K = 5 per source).** Cutting candidates from 23.7 to 9.6 per S1 costs 0.018
 (v1: 0.9256 → 0.9074). K = 10 was kept.
 
