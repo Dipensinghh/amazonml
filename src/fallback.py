@@ -8,7 +8,7 @@ weights renormalized, so a blank address neither helps nor hurts.
 Then ownership.decide(scores, t) keeps each S2/S3 id only for its best S1.
 
 Dev/tuning (validation):
-  python src/fallback.py --root C:/Users/sdipe/amazonmlchallenge \
+  python src/fallback.py --root . \
       --candidates artifacts/cand_val50k.parquet
   -> prints the grid, writes src/fallback_params.json (best weights + t).
 """

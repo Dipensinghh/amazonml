@@ -5,7 +5,7 @@
 Steps: load candidates (s1_id, cand_id) -> rule score with the tuned weights
 (src/fallback_params.json) -> ownership.decide(t) -> write_outputs -> checks.py
 (strict) -> organizer validator with --check-ids. Exit code 0 only if both pass.
-Paths default to the main checkout (--root) so it runs from a worktree too.
+Paths default to this checkout (--root); pass --root to read data from another one.
 """
 import argparse
 import json
@@ -24,7 +24,7 @@ from fallback import PARAMS_PATH, combine, load_features, pair_sims
 from io_utils import dedupe_pairs, write_outputs
 from ownership import decide
 
-DEFAULT_ROOT = Path(r"C:\Users\sdipe\amazonmlchallenge")
+DEFAULT_ROOT = Path(__file__).resolve().parents[1]  # the checkout / package holding src/
 
 
 def main() -> int:
