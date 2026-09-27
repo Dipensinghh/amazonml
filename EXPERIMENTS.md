@@ -274,6 +274,15 @@ converge (early stop at 2572 / 1648). leaves 255 vs 127 is +0.0003 — within no
 together, so this does not isolate the rev_* effect; it does show a model without the scale-dependent
 features is at least as good on val, which makes it the safer choice for test (1.73M S1s).
 
+### D: error analysis of the best config (2026-09-27)
+
+`src/error_analysis.py`: refit leaves=255, 1648 trees, 40 features; t = 0.70 on val50k. Macro F0.5 0.9326
+(US 0.9491 / India 0.9079), pair P/R 0.9833 / 0.8602 (ceiling 0.9293), singleton accuracy 0.9178.
+Misses 24,194: not retrieved 12,237 (68% India), below t 11,950 (41% blank candidate address), lost to
+ownership 7. False merges 2,529: distractors 1,690, another S1's target 839; 60% near-identical names.
+Zero-padded house numbers cause 38.6% of `num_conflict` flags on true pairs (3.9% on non-matches).
+Full write-up with 20 + 20 examples: `docs/section5_results.md`.
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
