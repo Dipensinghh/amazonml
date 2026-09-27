@@ -29,7 +29,7 @@ reverse-retrieval candidates (section 5.1, last bullet). v1 to v2cq_fix and v4r 
 | v2q | 40 (no rev_*) | 255 / 1648 | 0.9326 | 0.70 | 0.9491 | 0.9079 | 0.9833 / 0.8602 | 0.9178 | |
 | v2cq | 43 (rev_* over all 2.2M train S1s) | 255 / 1661 | 0.9370 | 0.68 | 0.9529 | 0.9133 | 0.9825 / 0.8763 | 0.9130 | |
 | v2cq_fix | 43, leading-zero fix | 255 / 1503 | 0.9394 | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | |
-| **v3** | 43, as v2cq_fix; 600k fit S1s | 255 / 2554 | **0.9423** | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | Submission 3: _pending_ |
+| **v3** | 43, as v2cq_fix; 600k fit S1s | 255 / 2554 | **0.9423** | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | **0.9285** (Submission 3) |
 | **v4r** (`models/r1_full`) | 44 = v2cq_fix + `from_reverse`; forward ∪ reverse candidates | 255 / 1372 | **0.9531** | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | **0.9421** (Submission 4) |
 
 Predicting no matches scores 0.054 on val50k. The candidate recall ceiling is 0.9293 for the forward
@@ -65,8 +65,9 @@ model sits below its ceiling.
   set is untested.
 
 **Validation vs public.** The fallback's public score matched validation (0.658 vs 0.6561); both
-LightGBM models submitted so far lost about 0.01 (v1b 0.9262 → 0.9164; v4r 0.9531 → 0.9421), a consistent
-gap that keeps the validation ranking usable for model choice. Likely contributors: France (15% of test S1s, no labels, unseen in
+LightGBM models submitted so far lost about 0.01 (v1b 0.9262 → 0.9164; v3 0.9423 → 0.9285; v4r
+0.9531 → 0.9421), a consistent gap that keeps the validation ranking usable for model choice: the public
+order of the three matches their validation order. Likely contributors: France (15% of test S1s, no labels, unseen in
 training) and denser competition for targets at test scale. On test, v4r predicts 3.23 matches per S1
 with 6.14% of S1s empty; France alone gets 3.32 matches per S1 with 5.53% empty, close to the training
 rates (3.46 matches, 5.6% singletons), which suggests the model is not collapsing on the unseen country.
