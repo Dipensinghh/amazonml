@@ -139,3 +139,74 @@ Also noted: K=5, α 6 with nl-index gives 0.9106 @ 14.4 cands/S1 (≥ 0.91 with 
 candidates) — an option if candidate-set size weighs heavily in judging.
 (This run overwrote `artifacts/val_blocking_pool_cap200.parquet`; `cand_val50k.parquet` was
 built from the frozen-config pool before it.)
+
+## 2026-09-27 — Stage 3: features (`src/features.py`, `src/dev_candidates.py`) — B
+
+| date | config | pairs | throughput | 40M extrapolation | runtime | notes |
+|------|--------|-------|-----------|-------------------|---------|-------|
+| 2026-09-27 | `dev_candidates` 5,000 val S1, 20 hard negs | 117,287 (17,287 pos / 100,000 neg) | — | — | 69s | 99,919 overlap + 81 pool negs; 3.46 pos/S1 matches EDA |
+| 2026-09-27 | `features.py` v1, 31 float32 feats | 117,287 | 22,209 pairs/s | ~30.0 min | 5.3s | peak RAM 1.3 GB; cpdist workers=-1 |
+| 2026-09-27 | `dev_candidates --side fit` 20,000 S1 | 468,900 (68,900 pos / 400,000 neg) | — | — | 77s | trainable set; 0 S1 overlap with the val set |
+| 2026-09-27 | `features.py` v2 (D review fixes) | 468,900 | 20,538 pairs/s | ~32.5 min | 22.8s | Arrow-backed records: 193 B/row vs 952 B/row for dicts |
+
+Strongest label separation (dev set, hard negatives): `addr_norm_tfidf` +0.803, `addr_phon_tfidf`
++0.801, `num_conflict` -0.707, `num_agree` +0.653, `acronym_match` +0.599, `addr_norm_token_set`
++0.557. Near-dead: `name_missing` (0.000), `is_s3` (+0.001), `addr_blank` (+0.004),
+`postal_conflict` (-0.005), `name_alt_token_set` (+0.018) — postal is 95% missing on this data.
+
+Caveat: these negatives come from token overlap, not from blocking top-k. Real blocking
+candidates are nearer neighbours, so expect every gap to compress on the true candidate set.
+The dev set also keeps 100% of true matches at ~15% positive, against ~8-9% on real candidates,
+so it must not be used to pick a threshold.
+
+### v2 — changes from D's review (2026-09-27)
+
+- **Record memory.** `load_records` returned a dict of per-row dicts. Measured at 952 B/row,
+  which is ~8.9 GB at 10M distinct targets and would very likely OOM a 16 GB box once the
+  40M-pair arrays were added. Now Arrow-backed at 193 B/row (~1.8 GB at 10M), with lookups via
+  `pc.index_in` instead of a Python dict.
+- **Address TF-IDF vocabulary.** Was fitted on a 200k sample of the dev candidates, i.e. train
+  text only, leaving test-only French addresses with an all-zero vector on ~15% of the test set.
+  Now sampled across every normalized parquet present; the cache records its sources and warns
+  when new ones appear. Dev-set means are unchanged (these are all train rows) — the fix is
+  only observable once the test parquets exist.
+- **Retrieval + competition features** (14, added when the candidate file carries
+  channel/score/rank): per-channel flags, channel count, best score/rank, rank fraction,
+  candidate-list size, gap and ratio to the S1's best, and the cross-S1 contest for a shared
+  target (reverse rank, contender count, score gap).
+- **Duplicate-pair collapse.** blocking.py emits one row per (pair, channel), so a pair found by
+  three channels appears three times; `collapse()` folds them (score = max, rank = min, one flag
+  per channel) before any feature is computed.
+- **`--side fit|val|both`** on dev_candidates, so a training set can be drawn from the 80% the
+  model is actually fitted on.
+- **`feature_columns(table)`** is now the train/predict column contract. "Numeric columns" is
+  not a safe test: `label` is int8 and passes it.
+
+### v3 adapter — features over A's real candidates (2026-09-27)
+
+Regenerated A's candidate files locally with the frozen config (A's Drive copies never reached
+this machine): `cand_val50k` 1,183,283 pairs @ 23.67 cands/S1, `cand_fit200k` 4,732,479 pairs @
+23.66 — both matching A's reported 23.7.
+
+| set | pairs | features | positives | throughput | peak RAM |
+|-----|-------|----------|-----------|-----------|----------|
+| cand_val50k | 1,183,283 | 43 | 160,824 (13.59%) | 21,543 /s | 3.1 GB |
+| cand_fit200k | 4,732,479 | 43 | 644,259 (13.61%) | 21,616 /s | 5.3 GB |
+
+**43 features, not 45.** v3 has no A/P/B/C channels, so `ch_*` + `n_channels` (5) are replaced by
+`from_blank_index`, `retr_tok_score`, `retr_name_sim` (3). 31 base + 12 retrieval = 43.
+
+Strongest separation is now the retrieval and competition block, ahead of every string feature:
+`retr_score` +99.6, `score_gap_best` -94.5, `retr_rank` -10.2, then `rev_score_gap`, `rev_count`,
+`rev_rank`. On fit200k a true match sits at `rev_rank` 0.002 against 5.62 for a non-match — i.e.
+a true pair is nearly always the top bidder for its target. Best string features are
+`acronym_match` +0.543 and `addr_norm_tfidf` +0.490.
+
+Address TF-IDF refitted over all 6 normalized sources (587,799 sampled addresses, vocab 18,776).
+French addresses now produce 20-24 nonzero trigrams where they previously scored all-zero.
+
+**Scale caveat on the competition features.** `rev_*` is computed within one candidate set, so it
+is not comparable across sets: negatives average `rev_count` 4.0 on val50k (50k S1s) against 13.2
+on fit200k (200k S1s). At test scale (1.73M S1s) it will be larger again, so a model trained on
+fit200k meets a shifted distribution at inference. `rev_rank` and `rev_score_gap` are more robust
+than the raw `rev_count`.
