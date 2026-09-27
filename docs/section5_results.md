@@ -13,8 +13,8 @@ this set is 0.9293.
 
 **Final model: v4r-600k** (`models/r1_600k`): LightGBM on forward ∪ reverse-retrieval candidates, 44
 features, 600,000 fitting S1s, 255 leaves, 2,978 trees. Validation macro F0.5 **0.9561** (US 0.9658,
-India 0.9418) at its validation-tuned threshold 0.70, public leaderboard **0.9465** at 0.70. The final
-threshold is **0.78**, chosen from two public probes of v4r (section 5.2); its public score is pending.
+India 0.9418) at its validation-tuned threshold 0.70. Final threshold **0.78**, chosen from two public
+probes of v4r (section 5.2). Public leaderboard: **0.9471** at 0.78 (final submission), 0.9465 at 0.70.
 
 All models are LightGBM binary classifiers scored on val50k with a single threshold tuned after global
 target ownership. v1 to v3 use the frozen blocking-v3 candidates (K = 10 per source); v4r adds
@@ -32,7 +32,7 @@ v3 and v4r-600k on 600,000 fitting S1s (the extra 400k drawn reproducibly by `fi
 | v2cq_fix | 43, leading-zero fix | 255 / 1503 | 0.9394 | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | |
 | **v3** | 43, as v2cq_fix; 600k fit S1s | 255 / 2554 | **0.9423** | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | **0.9285** (Submission 3) |
 | **v4r** (`models/r1_full`) | 44 = v2cq_fix + `from_reverse`; forward ∪ reverse candidates | 255 / 1372 | **0.9531** | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | **0.9421** (Submission 4) |
-| **v4r-600k** (`models/r1_600k`) | 44, as v4r; 600k fit S1s | 255 / 2978 | **0.9561** | 0.70 | 0.9658 | 0.9418 | 0.9860 / 0.9142 | 0.9367 | **0.9465** (Submission 5, t = 0.70) |
+| **v4r-600k** (`models/r1_600k`) | 44, as v4r; 600k fit S1s | 255 / 2978 | **0.9561** | 0.70 | 0.9658 | 0.9418 | 0.9860 / 0.9142 | 0.9367 | 0.9465 at t = 0.70; **0.9471 at t = 0.78 (final)** |
 
 Predicting no matches scores 0.054 on val50k. The candidate recall ceiling is 0.9293 for the forward
 candidates (US 0.9621, India 0.8806) and 0.9578 with reverse retrieval (US 0.9777, India 0.9281); every
@@ -105,8 +105,9 @@ further, to avoid fitting the public subset.
 | 0.78 | 3.181 | 6.37% | **0.9431** (+0.0010) |
 
 The public score rises monotonically with the threshold across the three points, and 0.78 beats 0.70
-by 0.0010, above the pre-set bar, so the final threshold is **0.78** (applied to v4r-600k without
-retraining). A higher threshold trading recall for precision fits the steady validation-to-public drop:
+by 0.0010, above the pre-set bar, so the final threshold is **0.78**. Applied to v4r-600k without
+retraining, it moved the public score from 0.9465 to **0.9471** (+0.0006): the same direction, a smaller
+gain than on v4r. A higher threshold trading recall for precision fits the steady validation-to-public drop:
 the test set, with unseen France and 1.73M S1s competing for targets, appears to punish false merges more
 than validation does. The margin is small and measured on the public subset only, so no further
 thresholds were probed.
