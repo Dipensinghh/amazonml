@@ -1,0 +1,12 @@
+{
+  "weights": [
+    1,
+    4,
+    1
+  ],
+  "t": 0.85,
+  "val_f05": 0.6561,
+  "candidates": "artifacts/cand_val50k.parquet",
+  "channels": null,
+  "k": null
+}

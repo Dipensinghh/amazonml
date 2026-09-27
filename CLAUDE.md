@@ -82,6 +82,7 @@ Log every experiment in EXPERIMENTS.md: blocking recall, avg candidates/S1, val 
 
 ## Git
 Repo: https://github.com/Dipensinghh/amazonml (branch `main`). Never commit data (dataset/, sample/, artifacts/, output/, *.tsv, *.parquet, *.zip) or files >50 MB.
+Exception: artifacts/addr_tfidf.joblib is tracked on purpose; train and test features must share it.
 Never commit organizer materials (PDFs, video, organizer README.md, Documentation_template.md, utils/) — repo may go public.
 Commit after each pipeline stage; the message must include the key metric where relevant,
 e.g. `blocking: TF-IDF name+addr, recall 0.973 @ 38 cands/S1` or `train: LGBM v1, val F0.5 0.912`.

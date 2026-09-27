@@ -376,6 +376,8 @@ def produce(name: str, jobs: int) -> None:
     t_start, clock = time.perf_counter(), {"fixed": 0.0}
     if name == "test":
         split, q_all = "test", load("S1", "test")
+    elif name == "trainall":   # every train S1 (fit + val) vs all train S2/S3
+        split, q_all = "train", load("S1", "train")
     else:
         split, s1 = "train", load("S1", "train")
         is_val = make_split(s1["entity_id"])
@@ -402,7 +404,7 @@ def main() -> None:
     ap.add_argument("--sample", type=int, default=50_000, help="val S1 sample size (0 = all val)")
     ap.add_argument("--caps", type=int, nargs="+", default=[200, 500, 2000])
     ap.add_argument("--jobs", type=int, default=8, help="processes for token hashing")
-    ap.add_argument("--produce", choices=["test", "val50k", "fit200k"],
+    ap.add_argument("--produce", choices=["test", "val50k", "fit200k", "trainall"],
                     help="write artifacts/cand_<name>.parquet with the frozen config and exit")
     ap.add_argument("--from-pool", help="with --produce val50k: derive from a saved eval pool parquet")
     ap.add_argument("--nl-index", action="store_true",

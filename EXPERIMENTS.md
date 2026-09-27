@@ -211,10 +211,36 @@ on fit200k (200k S1s). At test scale (1.73M S1s) it will be larger again, so a m
 fit200k meets a shifted distribution at inference. `rev_rank` and `rev_score_gap` are more robust
 than the raw `rev_count`.
 
+---
+
+## 2026-09-27 — Role C independent full-test reproduction (macOS)
+
+Machine: 36 GiB RAM, 14 logical CPUs, Python 3.14.7. Command:
+`python -u src/blocking.py --produce test --jobs 8`.
+
+- Normalized test rows: S1 1,732,544; S2 4,887,273; S3 5,082,316. Peak RAM 5.1 GB.
+- Frozen blocker: 40,696,839 pairs in 433 s, peak RAM 10.6 GB, 23.4896 candidates/S1.
+- Country means: US 23.7616; India 23.5262; France 22.6806.
+- Coverage: 1,732,543 / 1,732,544 S1s; the single zero-candidate query is in France.
+- Exact streaming audit passed: expected schema, no nulls, finite scores, `name_sim` in
+  [0,100], source/prefix agreement, contiguous ranks, no duplicate target within an S1, and
+  query groups in normalized S1 order.
+- B integration smoke test on 100,000 real pairs passed exact pair equality and produced 43
+  finite feature columns at 23,145 pairs/s (1.4 GB peak RAM).
+- Full B feature run: 40,696,839 rows x 43 features, 1,714.4 s feature compute
+  (23,738 pairs/s), about 31 minutes end-to-end, 11.6 GB peak RAM. The 2.08 GiB Parquet passed
+  exact candidate/feature pair and row-order equality, no-null, and finite-value checks.
+
+B's current feature builder retains the full candidate DataFrame, referenced corpus rows, and
+all output chunks until the final write, but the measured full run fits safely on the 36 GiB
+Mac. A streaming rewrite is not needed for this submission.
+
 ## Model
 
 | date | config | val F0.5 | US | India | France | threshold | runtime | notes |
 |------|--------|----------|----|-------|--------|-----------|---------|-------|
+| 2026-09-27 | v1: LGBM 43 feats, fit200k → val50k | 0.9256 | 0.9439 | 0.8984 | n/a | 0.71 | 2.4 min, 5.2 GB | 800 trees, no early stop |
+| 2026-09-27 | v1b: v1 minus rev_rank/rev_count/rev_score_gap (40) | **0.9262** | 0.9448 | 0.8985 | n/a | 0.68 | 2.8 min, 4.5 GB | 800 trees, no early stop |
 
 ### D: scoring, split and rules fallback (E00-E01)
 
@@ -237,6 +263,43 @@ Fit: `dev_candidates_fit_features.parquet` (468,900 pairs, 20,000 fitting S1s). 
 
 LightGBM beats the rules by +0.047 on identical pairs. Ownership effect: 0 (collision rate 0.0 at 5,000 S1s). Top gain: `addr_phon_token_set`, `addr_norm_token_set` (address dominates), then `name_norm_token_sort`, address TF-IDF, `num_conflict`.
 Caveat: not comparable to E01 (0.662) - those were real top-k candidates with 93% recall; this set has 100% recall and easier negatives. Threshold 0.73 is not usable. Redo on C's real candidates.
+
+### D: LightGBM v1 / v1b on the frozen blocking candidates (E04)
+
+Data: `cand_fit200k_features.parquet` (4,732,479 pairs, 200k fitting S1, 13.6% positive) and
+`cand_val50k_features.parquet` (1,183,283 pairs, 13.6% positive), built by `features.py --labels`
+(43 features via `feature_columns()`, no NaN/inf, rows = input rows; `name_missing` constant in
+both; cached `addr_tfidf.joblib` sha256 7a9d6370…249e3, not refit). Scope: exactly
+`artifacts/val50k_s1_ids.parquet` (50,000 S1, 2,702 singletons, 0 without candidates;
+blocking pair-recall ceiling 0.929). Params: 800 trees, lr 0.05, 31 leaves,
+min_child_samples 50, early stop 50 on val log loss. Models: `models/v1`, `models/v1b`
+(lgbm.txt + bundle.json with ordered features, best_iteration, threshold; val_report.json).
+
+| metric (val50k, global ownership) | v1 (43) | v1b (40, no rev_*) | fallback |
+|---|---|---|---|
+| macro F0.5 with ownership | 0.9256 | **0.9262** | 0.6561 |
+| macro F0.5 without ownership | 0.9256 | 0.9261 | |
+| threshold | 0.71 | 0.68 | |
+| US / India | 0.9439 / 0.8984 | 0.9448 / 0.8985 | |
+| pair precision / recall | 0.9794 / 0.8504 | 0.9813 / 0.8478 | |
+| singleton accuracy | 0.9175 (223 false merges / 2,702) | 0.9171 (224) | |
+| avg predicted matches per S1 | 3.01 | 2.99 | (gold 3.46) |
+| val log loss @ 800 | 0.03587 | 0.03465 | |
+| K=5 re-score (9.6 cands/S1) | 0.9074 | 0.9078 | |
+| ownership collision rate | 0.005% | 0.012% | |
+
+Top-15 gain (v1): addr_phon_token_set, retr_rank, name_norm_partial, num_agree, addr_phon_tfidf,
+name_norm_jw, name_norm_token_sort, name_phon_jw, addr_norm_token_set, name_core_partial,
+rank_frac, addr_norm_tfidf, num_conflict, name_core_ratio, name_phon_token_sort.
+v1b: same set, near-identical order (name_norm_jw and addr_phon_tfidf swap; name_core_ratio above num_conflict).
+
+Findings: LightGBM +0.27 over the fallback. Dropping the rev_* competition features costs
+nothing (v1b ≥ v1): computed within a 200k/50k candidate file they see much thinner competition
+than on the full test set, so v1b is the safer choice until they are computed over all S1s
+(cand_trainall). Neither run early-stopped — both still improving at 800 trees; more trees are
+likely worth a little. Precision (0.98) far exceeds recall (0.85, ceiling 0.93): threshold
+already favours precision as F0.5 wants. India trails US by ~0.046. Cutting to K=5 per source
+costs ~0.018 F0.5 for 60% fewer candidates.
 
 ### D: LightGBM config sweep on real v3 candidates + features (2026-09-27)
 
@@ -322,3 +385,85 @@ Side result: the leading-zero fix alone moves this 40-feature config from 0.9326
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
 |------|------------------|----------------|--------------|--------------|
+
+---
+
+## 2026-09-27 — India frozen-blocker miss study (Role C)
+
+Exact India subset of the seeded 50k validation scope: 20,086 S1s, 69,685 labelled pairs.
+Frozen cap-200 baseline: 0.8805 recall at 23.51 candidates/S1; 8,327 true pairs missed.
+
+Mutually exclusive miss classification:
+
+| Cause | Missed pairs |
+|---|---:|
+| Other noise / pool or rerank limit | 4,727 |
+| Transliteration mismatch | 2,049 |
+| Generic shared tokens dropped by cap | 1,074 |
+| Blank target address | 477 |
+
+Controlled alternatives all retained K=10 and stayed near 24 candidates/S1:
+
+| Configuration | Recall | Candidates/S1 | Change |
+|---|---:|---:|---:|
+| Frozen, cap 200 | 0.8805 | 23.51 | — |
+| India cap 500 | 0.8803 | 23.77 | -0.02 pp |
+| India cap 1000 | 0.8799 | 23.88 | -0.06 pp |
+| ph/f, v/w, aa/a, doubled-letter variants | 0.8690 | 23.78 | -1.15 pp |
+| Phonetic-address token pairs | 0.8563 | 23.53 | -2.42 pp |
+
+No variant met the predeclared +2 point gate. Keep the frozen blocker unchanged. Full results
+and examples are in `artifacts/india_retrieval_report.json`; runtime 344 s, peak RAM 11.4 GB.
+
+## 2026-09-27 — Chunked test scorer smoke test (Role C)
+
+`src/score_test.py` was tested end to end with a tiny LightGBM bundle and contested target:
+chunked scoring preserved all pair rows and order, global ownership chose the higher score,
+atomic score output completed, both TSVs were written, `checks.py` passed, and the organizer
+validator passed with `--check-ids`.
+
+The full test feature `rev_*` columns were also independently recomputed for 100 contested
+targets (5,263 rows across 3,514 S1s); rank, contender count, and score gap matched exactly,
+confirming that competition was computed globally before feature batching.
+
+---
+
+## 2026-09-27 — Reverse target-to-S1 retrieval (Role C)
+
+Each of the 10.32M training S2/S3 targets queried the complete country-specific training S1
+index using the unchanged frozen token-pair representation (cap 200, top-30 pool, alpha 6 name
+rerank). Reverse ranks 1-3 belonging to the exact seeded 50k validation scope were unioned with
+the 1,183,283 frozen forward pairs. The S1 index always contained all 2,206,821 training S1s, so
+the experiment retained real target-side competition.
+
+| Reverse quota | Overall recall / cands | US recall / cands | India recall / cands | Forward misses recovered | Overall lift | Gate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 (forward) | 0.9293 / 23.67 | 0.9621 / ~23.8 | 0.8805 / 23.51 | — | — | — |
+| R=1 | 0.9579 / 24.10 | 0.9778 / 24.04 | 0.9283 / 24.19 | 40.42% | +2.86 pp | PASS |
+| R=2 | 0.9608 / 26.02 | 0.9794 / 25.82 | 0.9332 / 26.31 | 44.58% | +3.15 pp | PASS |
+| R=3 | **0.9627 / 28.64** | **0.9804 / 28.33** | **0.9363 / 29.11** | **47.19%** | **+3.34 pp** | PASS |
+
+All quotas pass the predeclared gate (+2 overall recall points at <=30 candidates/S1). R=1 is
+the cost-efficient option (+0.44 candidates/S1); R=3 maximizes recall while remaining below the
+budget (+4.97 candidates/S1). Exact run: 479 s, peak RAM 10.4 GB. Full details are in the ignored
+`artifacts/reverse_retrieval_report.json`; retained R=3 pairs are in
+`artifacts/reverse_val50k_r3.parquet`.
+
+---
+
+## 2026-09-27 — Whole-population competition block (trainall)
+
+`src/competition.py` ran `features.collapse` (FROZEN alpha 6.0) over all of `cand_trainall`
+(52.2M pairs, 2.21M S1s, 9.71M candidates) with int32-coded ids, partitioned by cand_id into
+4 buckets (exact, since rev_* depend only on the cand_id group; checked against a direct
+`collapse` call on 300k rows). Runtime 82 s, peak RAM 4.4 GB → `artifacts/competition_trainall.parquet`.
+
+On the 4.73M cand_fit200k rows (all found in trainall), sample-level vs whole-population values:
+
+| label | n | rev_count sample | rev_count full | rev_rank sample | rev_rank full |
+|---|---|---|---|---|---|
+| 0 | 4,088,221 | 13.16 | 135.70 | 5.62 | 62.20 |
+| 1 | 644,258 | 1.42 | 5.62 | 0.002 | 0.025 |
+
+rev_rank==0 share: label 0 0.685 → 0.101, label 1 0.998 → 0.991. The fit200k features
+understate competition by ~10x, so train on these full values when rev_* features are used.
