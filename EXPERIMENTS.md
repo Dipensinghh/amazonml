@@ -163,3 +163,43 @@ Machine: 36 GiB RAM, 14 logical CPUs, Python 3.14.7. Command:
 B's current feature builder retains the full candidate DataFrame, referenced corpus rows, and
 all output chunks until the final write, but the measured full run fits safely on the 36 GiB
 Mac. A streaming rewrite is not needed for this submission.
+
+---
+
+## 2026-09-27 — India frozen-blocker miss study (Role C)
+
+Exact India subset of the seeded 50k validation scope: 20,086 S1s, 69,685 labelled pairs.
+Frozen cap-200 baseline: 0.8805 recall at 23.51 candidates/S1; 8,327 true pairs missed.
+
+Mutually exclusive miss classification:
+
+| Cause | Missed pairs |
+|---|---:|
+| Other noise / pool or rerank limit | 4,727 |
+| Transliteration mismatch | 2,049 |
+| Generic shared tokens dropped by cap | 1,074 |
+| Blank target address | 477 |
+
+Controlled alternatives all retained K=10 and stayed near 24 candidates/S1:
+
+| Configuration | Recall | Candidates/S1 | Change |
+|---|---:|---:|---:|
+| Frozen, cap 200 | 0.8805 | 23.51 | — |
+| India cap 500 | 0.8803 | 23.77 | -0.02 pp |
+| India cap 1000 | 0.8799 | 23.88 | -0.06 pp |
+| ph/f, v/w, aa/a, doubled-letter variants | 0.8690 | 23.78 | -1.15 pp |
+| Phonetic-address token pairs | 0.8563 | 23.53 | -2.42 pp |
+
+No variant met the predeclared +2 point gate. Keep the frozen blocker unchanged. Full results
+and examples are in `artifacts/india_retrieval_report.json`; runtime 344 s, peak RAM 11.4 GB.
+
+## 2026-09-27 — Chunked test scorer smoke test (Role C)
+
+`src/score_test.py` was tested end to end with a tiny LightGBM bundle and contested target:
+chunked scoring preserved all pair rows and order, global ownership chose the higher score,
+atomic score output completed, both TSVs were written, `checks.py` passed, and the organizer
+validator passed with `--check-ids`.
+
+The full test feature `rev_*` columns were also independently recomputed for 100 contested
+targets (5,263 rows across 3,514 S1s); rank, contender count, and score gap matched exactly,
+confirming that competition was computed globally before feature batching.

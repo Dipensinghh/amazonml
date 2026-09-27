@@ -104,3 +104,16 @@ to this Mac, Role C should verify exact scored/exported pair equality before giv
 - Score `cand_test_features.parquet` without changing row order or pair coverage. Return a score
   artifact containing exactly `s1_id`, `cand_id`, and the model probability, plus the model,
   bundle, threshold, and validation report for A.
+
+## Additional handoff completed after B became unavailable
+
+- `src/score_test.py` is ready for the LightGBM bundle. It scores in chunks, writes every score
+  atomically in candidate order, resolves global ownership, writes both TSVs, and runs both
+  validators. A contested-target dummy model passed the entire path.
+- The test feature `rev_*` fields are global. An independent full-file check reproduced all
+  three fields for 100 contested targets spanning 3,514 S1s.
+- The India study found no improvement worth a production rerun. Baseline was 0.8805 recall at
+  23.51 candidates/S1; cap 500, cap 1000, transliteration variants, and phonetic address pairs
+  all reduced recall. Keep the frozen blocker.
+- The package skeleton now contains `code/business_entity_resolution/{README.md,requirements.txt,run.py}`
+  and `docs/section2_retrieval.md`. A must copy the final integrated `src/` into the package.
