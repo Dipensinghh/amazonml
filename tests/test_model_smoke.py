@@ -27,12 +27,12 @@ import features as F  # noqa: E402
 import train as T  # noqa: E402
 from ownership import decide  # noqa: E402
 
-COLS = F.BASE_FEATURES + F.CORE_RETRIEVAL + F.V3_EXTRA  # the 43 v3 model inputs
+COLS = F.BASE_FEATURES + F.CORE_RETRIEVAL + F.V3_EXTRA  # the 44 R=1 v3 model inputs
 VALIDATOR = Path(os.environ.get("VALIDATOR", REPO / "utils" / "validate_submission.py"))
 
 
 def _feats(rng, y: np.ndarray) -> dict:
-    """43 float32 columns; a few carry (noisy) signal about y."""
+    """44 float32 columns; a few carry (noisy) signal about y."""
     out = {c: rng.random(len(y)).astype(np.float32) for c in COLS}
     for c in ("name_core_token_set", "addr_norm_tfidf", "retr_score", "acronym_match"):
         out[c] = np.clip(0.4 * y + 0.6 * rng.random(len(y)), 0, 1).astype(np.float32)
@@ -49,7 +49,7 @@ def _write_source(path: Path, ids) -> None:
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory):
     """Train on 200 S1 x 10 candidates (2,000 labelled pairs) and refit; return (root, model_dir, bundle)."""
-    assert len(COLS) == 43
+    assert len(COLS) == 44
     rng = np.random.default_rng(42)
     root = tmp_path_factory.mktemp("smoke_root")
     for d in ("dataset/train", "dataset/test", "artifacts"):
@@ -73,7 +73,7 @@ def trained(tmp_path_factory):
 
 
 def test_bundle_contract(trained):
-    """bundle.json carries the ordered 43 features and a threshold in [0, 1]; both model files exist."""
+    """bundle.json carries the ordered 44 features and a threshold in [0, 1]; both model files exist."""
     _, model_dir, bundle = trained
     assert bundle["features"] == COLS
     assert 0.0 <= bundle["threshold"] <= 1.0
