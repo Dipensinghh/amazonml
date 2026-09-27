@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
 **Team Name:** Commit&Pray  
-**Team Members:** [fill in]  
+**Team Members:** Dipen Singh, Zaid Khan, Aryan Jha, Diljit Singh  
 **Submission Date:** 27 September 2026
 
 All scores marked "val" are tuned validation scores: early stopping and the threshold were chosen on
@@ -151,15 +151,24 @@ around the best, maximizing macro F0.5 after ownership over all 50,000 validatio
   leaves, early stopping) +0.0064; whole-population competition features +0.0044 (within-file rev_*
   added nothing: v1 0.9256 vs v1b 0.9262); leading-zero house-number fix +0.0024 (true pairs flagged as
   a house-number conflict fell 11,907 → 7,305; singleton accuracy 0.913 → 0.939); 600k instead of 200k
-  fitting S1s +0.0029, mostly recall (0.8739 → 0.8844) and India (0.9145 → 0.9192).
+  fitting S1s +0.0029, mostly recall (0.8739 → 0.8844) and India (0.9145 → 0.9192); v3's tuned
+  threshold fell from 0.73 to 0.66, trading a little singleton accuracy (0.9393 → 0.9352; 175 of 2,702
+  singletons get a false match) for that recall.
 - **Validation vs public:** fallback 0.6561 val / 0.658 public; v1b 0.9262 / 0.9164 (−0.01).
 - **Fewer candidates:** re-scoring v3 on K = 5 per source (9.6 candidates/S1 instead of 23.7) gives
   0.9232 (−0.019); K = 10 was kept.
 - **Ownership:** at 50,000 validation S1s it changes v3 by < 0.0001 (collision rate 0.011%); on the
   less confident rules fallback it added +0.051 (0.6049 → 0.6561). It stays on for test, where 1.73M
   S1s compete for targets.
-- **Tried, not adopted:** cross-source corroboration features (+0.0019, below the adoption bar); dropping
-  6 low-signal features (−0.0011).
+- **Cross-source corroboration (tried, not adopted).** 85% of matched S1s have matches in both S2 and S3,
+  so a true candidate should resemble one of the S1's candidates from the other source. For each pair,
+  the target was compared with the S1's top-5 other-source candidates (best name token-set, best
+  address token-set, best mean of the two, and that partner's rank). The signal is real
+  (`xsrc_best_both` 0.870 on true pairs vs 0.588 on non-matches), but on v2q's 40 features with the
+  leading-zero fix it added only **+0.0019** (0.9355 → 0.9374): below-threshold misses fell 10.7%
+  (11,153 → 9,959) and pair recall rose 0.0069, while precision moved −0.0006. It cannot reach pairs
+  that blocking never retrieved (half of all misses), so it fell short of the +0.004 adoption bar.
+- **Other:** dropping 6 low-signal features cost −0.0011, so all 43 were kept.
 
 **Error analysis** (v2q, t = 0.70, before the leading-zero fix). Of 173,059 true pairs 24,194 were
 missed; of 151,394 predicted pairs 2,529 were wrong.

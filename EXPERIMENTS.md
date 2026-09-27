@@ -240,7 +240,11 @@ Mac. A streaming rewrite is not needed for this submission.
 | date | config | val F0.5 | US | India | France | threshold | runtime | notes |
 |------|--------|----------|----|-------|--------|-----------|---------|-------|
 | 2026-09-27 | v1: LGBM 43 feats, fit200k → val50k | 0.9256 | 0.9439 | 0.8984 | n/a | 0.71 | 2.4 min, 5.2 GB | 800 trees, no early stop |
-| 2026-09-27 | v1b: v1 minus rev_rank/rev_count/rev_score_gap (40) | **0.9262** | 0.9448 | 0.8985 | n/a | 0.68 | 2.8 min, 4.5 GB | 800 trees, no early stop |
+| 2026-09-27 | v1b: v1 minus rev_rank/rev_count/rev_score_gap (40) | 0.9262 | 0.9448 | 0.8985 | n/a | 0.68 | 2.8 min, 4.5 GB | 800 trees, no early stop; public 0.9164 (Submission 2) |
+| 2026-09-27 | v2q: 40 feats, 255 leaves, fit200k → val50k | 0.9326 | 0.9491 | 0.9079 | n/a | 0.70 | 276 s, 4.7 GB | early stop 100 at 1,648 |
+| 2026-09-27 | v2cq: 43 feats, whole-population rev_* | 0.9370 | 0.9529 | 0.9133 | n/a | 0.68 | 263 s, 6.2 GB | early stop 100 at 1,661 |
+| 2026-09-27 | v2cq_fix: v2cq + leading-zero num_* fix | 0.9394 | 0.9561 | 0.9145 | n/a | 0.73 | 300 s, 6.0 GB | early stop 100 at 1,503 |
+| 2026-09-27 | v3: v2cq_fix on fit600k (600k fit S1s) | **0.9423** | 0.9578 | 0.9192 | n/a | 0.66 | 973 s, 9.7 GB | early stop 100 at 2,554; details below |
 
 ### D: scoring, split and rules fallback (E00-E01)
 
@@ -385,6 +389,8 @@ Side result: the leading-zero fix alone moves this 40-feature config from 0.9326
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
 |------|------------------|----------------|--------------|--------------|
+| 2026-09-27 | 0.658 | 0.6561 | 23.49 | Submission 1: rules fallback (`run_fallback.py`, w 1/4/1, t 0.85) on frozen v3 candidates |
+| 2026-09-27 | 0.916413 | 0.9262 | 23.49 | Submission 2: v1b (tag `sub02` = e99a5e5), t 0.68 |
 
 ---
 
@@ -467,3 +473,34 @@ On the 4.73M cand_fit200k rows (all found in trainall), sample-level vs whole-po
 
 rev_rank==0 share: label 0 0.685 → 0.101, label 1 0.998 → 0.991. The fit200k features
 understate competition by ~10x, so train on these full values when rev_* features are used.
+
+---
+
+## 2026-09-27 — Models v2q → v3 (D; frozen v3 candidates, K = 10)
+
+Source: `models/{v2q,v2cq,v2cq_fix,v3}/bundle.json` + `val_report.json`, commits 4dc5521, a948177,
+5c7be95, and `logs/train_*.log`. All: LightGBM binary, learning rate 0.05, 255 leaves, up to 3,000
+trees, early stopping 100 rounds on val log loss, min_child_samples 50, reg_lambda 1, seed 42,
+16 threads. Validation: the exact 50,000-S1 val50k scope (1,183,283 pairs, 2,702 singletons, recall
+ceiling 0.9293), threshold swept after global ownership. Fit sets are 13.61% positive.
+
+| model | features | fit set (pairs) | best iter | t | val F0.5 (own / no own) | US | India | pair P / R | singleton acc. (false merges) | pred/S1 | K=5 F0.5 | train runtime, peak RAM |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| v2q | 40 (no rev_*) | fit200k (4,732,479) | 1,648 | 0.70 | 0.9326 / 0.9325 | 0.9491 | 0.9079 | 0.9833 / 0.8602 | 0.9178 (222) | 3.028 | 0.9138 | 276 s, 4.7 GB |
+| v2cq | 43, rev_* from competition_trainall | fit200k (4,732,479) | 1,661 | 0.68 | 0.9370 / 0.9369 | 0.9529 | 0.9133 | 0.9825 / 0.8763 | 0.9130 (235) | 3.087 | 0.9180 | 263 s, 6.2 GB |
+| v2cq_fix | 43, as v2cq + leading-zero num_* fix | fit200k (4,732,479) | 1,503 | 0.73 | 0.9394 / 0.9393 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 (164) | 3.068 | 0.9203 | 300 s, 6.0 GB |
+| **v3** | 43, as v2cq_fix | fit600k = fit200k + fit400k_extra (14,196,982) | 2,554 | 0.66 | **0.9423** / 0.9422 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 (175) | 3.111 | 0.9232 | 973 s, 9.7 GB |
+
+- v2q vs v1b (+0.0064): capacity; 255 leaves converge (early stop) where 31 leaves at 800 trees did not.
+- v2cq vs v2q (+0.0044): rev_* joined from `competition_trainall.parquet` (all 2.2M train S1s) onto every
+  fit and val row (5,915,762 rows, all matched) instead of the within-file values; v1 → v1b had shown
+  within-file rev_* add nothing.
+- v2cq_fix vs v2cq (+0.0024): num_* recomputed with leading zeros stripped (`patch_num_features.py`);
+  singleton accuracy 0.9130 → 0.9393.
+- v3 vs v2cq_fix (+0.0029): 400,000 more fitting S1s (`fit_extra.py`: seed-42 sample of non-val S1s
+  outside fit200k, rows from cand_trainall; 9,464,503 pairs), whole-population rev_* and fixed num_*.
+  Mostly recall (0.8739 → 0.8844) and India (0.9145 → 0.9192); t 0.73 → 0.66 costs singleton accuracy
+  0.9393 → 0.9352.
+- Ownership changes every model by ≤ 0.0001 at 50k val S1s (collision rates 0.007%-0.015%).
+- K = 5 re-score (9.6 cands/S1) costs 0.019 (v3: 0.9423 → 0.9232).
+- Shipped in the submission package as `models/v3` (`code/business_entity_resolution/`).
