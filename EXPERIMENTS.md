@@ -368,3 +368,22 @@ the cost-efficient option (+0.44 candidates/S1); R=3 maximizes recall while rema
 budget (+4.97 candidates/S1). Exact run: 479 s, peak RAM 10.4 GB. Full details are in the ignored
 `artifacts/reverse_retrieval_report.json`; retained R=3 pairs are in
 `artifacts/reverse_val50k_r3.parquet`.
+
+---
+
+## 2026-09-27 — Whole-population competition block (trainall)
+
+`src/competition.py` ran `features.collapse` (FROZEN alpha 6.0) over all of `cand_trainall`
+(52.2M pairs, 2.21M S1s, 9.71M candidates) with int32-coded ids, partitioned by cand_id into
+4 buckets (exact, since rev_* depend only on the cand_id group; checked against a direct
+`collapse` call on 300k rows). Runtime 82 s, peak RAM 4.4 GB → `artifacts/competition_trainall.parquet`.
+
+On the 4.73M cand_fit200k rows (all found in trainall), sample-level vs whole-population values:
+
+| label | n | rev_count sample | rev_count full | rev_rank sample | rev_rank full |
+|---|---|---|---|---|---|
+| 0 | 4,088,221 | 13.16 | 135.70 | 5.62 | 62.20 |
+| 1 | 644,258 | 1.42 | 5.62 | 0.002 | 0.025 |
+
+rev_rank==0 share: label 0 0.685 → 0.101, label 1 0.998 → 0.991. The fit200k features
+understate competition by ~10x, so train on these full values when rev_* features are used.
