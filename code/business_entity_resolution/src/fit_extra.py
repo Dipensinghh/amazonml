@@ -45,11 +45,11 @@ def sample_sorted(ids: pa.Array, n: int) -> pa.Array:
     return sorted_ids(ids.take(pa.array(pos)))
 
 
-def extra_ids(n: int) -> pa.Array:
+def extra_ids(n: int, base_fit=ART / "cand_fit200k.parquet") -> pa.Array:
     """n non-validation train S1s outside cand_fit200k (seed 42), sorted."""
     split = pq.read_table(ART / "split_train.parquet")
     nonval = split.filter(pc.invert(split["is_val"]))["entity_id"]
-    fit200 = pc.unique(pq.read_table(ART / "cand_fit200k.parquet", columns=["s1_id"])["s1_id"])
+    fit200 = pc.unique(pq.read_table(base_fit, columns=["s1_id"])["s1_id"])
     eligible = nonval.filter(pc.invert(pc.is_in(nonval, value_set=fit200)))
     print(f"non-val {len(nonval):,}; fit200k {len(fit200):,}; eligible {len(eligible):,}", flush=True)
     return sample_sorted(eligible, n)
@@ -59,12 +59,17 @@ def main() -> int:
     """Write the extra id list and its candidate rows filtered from cand_trainall."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=400_000, help="number of extra fitting S1s")
+    ap.add_argument("--candidates", default=str(ART / "cand_trainall.parquet"),
+                    help="whole-train candidate parquet to filter")
+    ap.add_argument("--base-fit", default=str(ART / "cand_fit200k.parquet"),
+                    help="base fitting candidates whose S1 ids must be excluded")
+    ap.add_argument("--tag", help="output tag (default: fit{n//1000}k_extra)")
     a = ap.parse_args()
     t0 = time.perf_counter()
-    tag = f"fit{a.n // 1000}k_extra"
-    ids = extra_ids(a.n)
+    tag = a.tag or f"fit{a.n // 1000}k_extra"
+    ids = extra_ids(a.n, a.base_fit)
     pq.write_table(pa.table({"s1_id": ids}), ART / f"{tag}_s1_ids.parquet")
-    pf = pq.ParquetFile(ART / "cand_trainall.parquet")
+    pf = pq.ParquetFile(a.candidates)
     out = ART / f"cand_{tag}.parquet"
     tmp = out.with_suffix(".parquet.tmp")
     kept = 0

@@ -488,3 +488,22 @@ precision is 0.9843 and pair recall is 0.9106; average predicted matches are 3.2
 Submission 4 produced 5,603,577 matches (3.234/S1) with 6.144% empty S1s. By country:
 France 3.320 matches/S1 and 5.531% empty; India 3.151 and 6.608%; US 3.302 and 5.818%.
 `checks.py` and the organizer validator with `--check-ids` both passed on the complete files.
+
+### R=1 with 600k fitting S1s
+
+The exact v3 seed-42 extra sample added 400,000 non-validation S1s and 9,637,015 R=1 pairs
+to fit200k, for 600,000 fitting S1s total. All extra rows passed exact pair-order, no-null and
+finite-feature checks; their `rev_*` values came from `competition_trainall_r1`.
+
+With the same 255 leaves, learning rate 0.05, 3000-tree cap and early-stopping patience 100,
+the model reached its best log loss at iteration 2978 and validation macro F0.5 **0.9561** at
+threshold 0.70. This improves the 200k R=1 model by +0.0030. Per-country F0.5 is 0.9658 US and
+0.9418 India; pair precision is 0.9860, pair recall 0.9142 and singleton accuracy 0.9367.
+
+The complete test output contains 5,600,364 matches (3.232/S1) with 6.190% empty S1s.
+`checks.py` and the organizer validator with `--check-ids` passed. Output SHA-256 values:
+
+```text
+31df364661af2156d55da6471dac9b76e2a4f6b5af12082db3fb10d05300829e  matching_results.tsv
+0518c2b9db1be5260598f4f228c23f423f7f83d4757d7943cef193701c75310d  candidate_pairs.tsv
+```
