@@ -139,3 +139,27 @@ Also noted: K=5, α 6 with nl-index gives 0.9106 @ 14.4 cands/S1 (≥ 0.91 with 
 candidates) — an option if candidate-set size weighs heavily in judging.
 (This run overwrote `artifacts/val_blocking_pool_cap200.parquet`; `cand_val50k.parquet` was
 built from the frozen-config pool before it.)
+
+---
+
+## 2026-09-27 — Role C independent full-test reproduction (macOS)
+
+Machine: 36 GiB RAM, 14 logical CPUs, Python 3.14.7. Command:
+`python -u src/blocking.py --produce test --jobs 8`.
+
+- Normalized test rows: S1 1,732,544; S2 4,887,273; S3 5,082,316. Peak RAM 5.1 GB.
+- Frozen blocker: 40,696,839 pairs in 433 s, peak RAM 10.6 GB, 23.4896 candidates/S1.
+- Country means: US 23.7616; India 23.5262; France 22.6806.
+- Coverage: 1,732,543 / 1,732,544 S1s; the single zero-candidate query is in France.
+- Exact streaming audit passed: expected schema, no nulls, finite scores, `name_sim` in
+  [0,100], source/prefix agreement, contiguous ranks, no duplicate target within an S1, and
+  query groups in normalized S1 order.
+- B integration smoke test on 100,000 real pairs passed exact pair equality and produced 43
+  finite feature columns at 23,145 pairs/s (1.4 GB peak RAM).
+- Full B feature run: 40,696,839 rows x 43 features, 1,714.4 s feature compute
+  (23,738 pairs/s), about 31 minutes end-to-end, 11.6 GB peak RAM. The 2.08 GiB Parquet passed
+  exact candidate/feature pair and row-order equality, no-null, and finite-value checks.
+
+B's current feature builder retains the full candidate DataFrame, referenced corpus rows, and
+all output chunks until the final write, but the measured full run fits safely on the 36 GiB
+Mac. A streaming rewrite is not needed for this submission.
