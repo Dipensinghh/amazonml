@@ -42,15 +42,16 @@
     "rev_score_gap",
     "retr_tok_score",
     "retr_name_sim",
-    "from_blank_index"
+    "from_blank_index",
+    "from_reverse"
   ],
-  "best_iteration": 2554,
-  "threshold": 0.66,
-  "val_macro_f05": 0.9423070548080463,
+  "best_iteration": 1372,
+  "threshold": 0.7,
+  "val_macro_f05": 0.9531447264540681,
   "ownership": {
-    "with_ownership": 0.9423070548080463,
-    "without_ownership": 0.9422408733176331,
-    "collision_rate": 0.00010930577970384563
+    "with_ownership": 0.9531447264540681,
+    "without_ownership": 0.9531374683087048,
+    "collision_rate": 1.2491802254770307e-05
   },
   "all_empty_baseline": 0.05404,
   "params": {
@@ -65,9 +66,11 @@
     "verbosity": -1
   },
   "fit_s1_frac": 1.0,
-  "n_fit_pairs": 14196982,
-  "n_val_pairs": 1183283,
-  "pos_rate_fit": 0.13609216381340766,
+  "n_fit_pairs": 4819000,
+  "n_val_pairs": 1205167,
+  "early_stopping_rounds": 100,
+  "dropped_features": [],
+  "pos_rate_fit": 0.13771280348620046,
   "versions": {
     "lightgbm": "4.7.0",
     "sklearn": "1.9.0",
