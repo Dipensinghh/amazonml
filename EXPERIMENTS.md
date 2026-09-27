@@ -408,6 +408,31 @@ The full test feature `rev_*` columns were also independently recomputed for 100
 targets (5,263 rows across 3,514 S1s); rank, contender count, and score gap matched exactly,
 confirming that competition was computed globally before feature batching.
 
+---
+
+## 2026-09-27 — Reverse target-to-S1 retrieval (Role C)
+
+Each of the 10.32M training S2/S3 targets queried the complete country-specific training S1
+index using the unchanged frozen token-pair representation (cap 200, top-30 pool, alpha 6 name
+rerank). Reverse ranks 1-3 belonging to the exact seeded 50k validation scope were unioned with
+the 1,183,283 frozen forward pairs. The S1 index always contained all 2,206,821 training S1s, so
+the experiment retained real target-side competition.
+
+| Reverse quota | Overall recall / cands | US recall / cands | India recall / cands | Forward misses recovered | Overall lift | Gate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 (forward) | 0.9293 / 23.67 | 0.9621 / ~23.8 | 0.8805 / 23.51 | — | — | — |
+| R=1 | 0.9579 / 24.10 | 0.9778 / 24.04 | 0.9283 / 24.19 | 40.42% | +2.86 pp | PASS |
+| R=2 | 0.9608 / 26.02 | 0.9794 / 25.82 | 0.9332 / 26.31 | 44.58% | +3.15 pp | PASS |
+| R=3 | **0.9627 / 28.64** | **0.9804 / 28.33** | **0.9363 / 29.11** | **47.19%** | **+3.34 pp** | PASS |
+
+All quotas pass the predeclared gate (+2 overall recall points at <=30 candidates/S1). R=1 is
+the cost-efficient option (+0.44 candidates/S1); R=3 maximizes recall while remaining below the
+budget (+4.97 candidates/S1). Exact run: 479 s, peak RAM 10.4 GB. Full details are in the ignored
+`artifacts/reverse_retrieval_report.json`; retained R=3 pairs are in
+`artifacts/reverse_val50k_r3.parquet`.
+
+---
+
 ## 2026-09-27 — Whole-population competition block (trainall)
 
 `src/competition.py` ran `features.collapse` (FROZEN alpha 6.0) over all of `cand_trainall`
