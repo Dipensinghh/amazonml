@@ -283,6 +283,23 @@ ownership 7. False merges 2,529: distractors 1,690, another S1's target 839; 60%
 Zero-padded house numbers cause 38.6% of `num_conflict` flags on true pairs (3.9% on non-matches).
 Full write-up with 20 + 20 examples: `docs/section5_results.md`.
 
+### D: leading-zero fix for house-number features (2026-09-27)
+
+`features.num_features` compares `addr_nums` tokens with leading zeros stripped (`005705` == `5705`);
+postal tokens are unchanged. `src/patch_num_features.py` recomputes only num_agree / num_conflict /
+num_missing in an existing feature parquet with that same function (streamed, row order and schema kept).
+
+cand_val50k (1,183,283 pairs), 7 s, 0.6 GB peak:
+
+| | num_conflict before | after | change |
+|---|---|---|---|
+| true pairs | 11,907 | 7,305 | -4,602 (-38.6%) |
+| non-matches | 382,269 | 367,231 | -15,038 (-3.9%) |
+
+num_agree changed on 23,307 rows; num_missing unchanged. Checks: only num_agree / num_conflict differ from
+the original file; row order and schema identical; values identical to a fresh `features.py` build on
+20,000 pairs. Model impact not yet measured (needs a retrain on patched fit200k).
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |

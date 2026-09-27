@@ -84,7 +84,7 @@ TFIDF_PARAMS = dict(analyzer="char_wb", ngram_range=(3, 3), sublinear_tf=True,
 
 
 # ---------------------------------------------------------------- record loading
-def load_records(ids: pa.Array, split: str, sources: tuple) -> pa.Table:
+def load_records(ids: pa.Array, split: str, sources: tuple, columns: list = REC_COLS) -> pa.Table:
     """The referenced normalized rows, as one Arrow table.
 
     Arrow-backed rather than a dict of per-row dicts: at ~10M distinct targets a Python dict
@@ -95,7 +95,7 @@ def load_records(ids: pa.Array, split: str, sources: tuple) -> pa.Table:
     parts = []
     for src in sources:
         pf = pq.ParquetFile(norm_path(split, src))
-        for rb in pf.iter_batches(batch_size=250_000, columns=REC_COLS):
+        for rb in pf.iter_batches(batch_size=250_000, columns=columns):
             sel = rb.filter(pc.is_in(rb.column("entity_id"), value_set=ids))
             if sel.num_rows:
                 parts.append(sel)
@@ -133,17 +133,21 @@ def sim(a: list, b: list, scorer) -> np.ndarray:
     return s
 
 
-def token_stats(a: list, b: list) -> tuple:
+def token_stats(a: list, b: list, strip_zeros: bool = False) -> tuple:
     """(agreement, conflict, missing) over two space-joined token strings.
 
     agreement = Jaccard overlap; conflict = both sides present but disjoint;
     missing   = at least one side empty (agreement and conflict are then 0).
+    strip_zeros compares tokens with leading zeros removed ("005705" == "5705").
     """
     agree = np.zeros(len(a), dtype=np.float32)
     conflict = np.zeros(len(a), dtype=np.float32)
     missing = np.zeros(len(a), dtype=np.float32)
     for i, (x, y) in enumerate(zip(a, b)):
         sx, sy = set(x.split()), set(y.split())
+        if strip_zeros:
+            sx = {t.lstrip("0") or "0" for t in sx}
+            sy = {t.lstrip("0") or "0" for t in sy}
         if not sx or not sy:
             missing[i] = 1.0
             continue
@@ -151,6 +155,17 @@ def token_stats(a: list, b: list) -> tuple:
         agree[i] = inter / len(sx | sy)
         conflict[i] = 0.0 if inter else 1.0
     return agree, conflict, missing
+
+
+def num_features(a_nums: list, b_nums: list) -> dict:
+    """num_agree / num_conflict / num_missing for aligned addr_nums lists.
+
+    House numbers are zero-padded as noise (38.6% of house-number conflicts on true val50k pairs were
+    only padding), so leading zeros are stripped here. Postal tokens keep theirs. Shared by
+    features_for and patch_num_features.py so both produce identical values.
+    """
+    agree, conflict, missing = token_stats(a_nums, b_nums, strip_zeros=True)
+    return {"num_agree": agree, "num_conflict": conflict, "num_missing": missing}
 
 
 def corpus_sources() -> list:
@@ -248,8 +263,7 @@ def features_for(a: dict, b: dict, vecs: tuple) -> dict:
     f["addr_norm_tfidf"] = cosine_rows(vecs[0], an, bn)
     f["addr_phon_tfidf"] = cosine_rows(vecs[1], ap, bp)
 
-    f["num_agree"], f["num_conflict"], f["num_missing"] = token_stats(a["addr_nums"],
-                                                                      b["addr_nums"])
+    f.update(num_features(a["addr_nums"], b["addr_nums"]))
     f["postal_agree"], f["postal_conflict"], f["postal_missing"] = token_stats(a["addr_postal"],
                                                                                b["addr_postal"])
 
