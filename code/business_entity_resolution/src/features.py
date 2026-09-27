@@ -289,7 +289,7 @@ CORE_RETRIEVAL = ["retr_score", "retr_rank", "rank_frac", "cand_count",
                   "score_gap_best", "score_ratio_best",
                   "rev_rank", "rev_count", "rev_score_gap"]
 # blocking.py v3 (frozen) emits tok_score / name_sim / final_rank and has no A/P/B/C channels.
-V3_EXTRA = ["retr_tok_score", "retr_name_sim", "from_blank_index"]
+V3_EXTRA = ["retr_tok_score", "retr_name_sim", "from_blank_index", "from_reverse"]
 # legacy channel-union schema (blocking v1/v2), kept so older parquets still work
 CHANNEL_EXTRA = [f"ch_{c}" for c in CHANNELS] + ["n_channels"]
 RETRIEVAL_FEATURES = CORE_RETRIEVAL + V3_EXTRA + CHANNEL_EXTRA
@@ -354,6 +354,8 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
                     retr_tok_score=("tok_score", "max"), retr_name_sim=("name_sim", "max"))
         if "blank_addr_index" in cols:
             spec["from_blank_index"] = ("blank_addr_index", "max")
+        if "from_reverse" in cols:
+            spec["from_reverse"] = ("from_reverse", "max")
     else:
         df = df.assign(_score=df["score"].to_numpy(np.float32))
         spec = dict(retr_score=("_score", "max"), retr_rank=(rank_col, "min"))
@@ -388,7 +390,8 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
     agg["rev_count"] = agg.groupby("cand_id")["cand_id"].transform("size").astype(np.float32)
     agg["rev_score_gap"] = (gc.transform("max") - agg["retr_score"]).astype(np.float32)
 
-    for c in ("retr_score", "retr_rank", "retr_tok_score", "retr_name_sim", "from_blank_index"):
+    for c in ("retr_score", "retr_rank", "retr_tok_score", "retr_name_sim", "from_blank_index",
+              "from_reverse"):
         if c in agg.columns:
             agg[c] = agg[c].astype(np.float32)
     if "retr_name_sim" in agg.columns:
