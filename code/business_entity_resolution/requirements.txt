@@ -1,9 +1,11 @@
-# Tested with CPython 3.14.7 on macOS and CPython 3.14.4 on Windows 11. CPU-only.
+# Pinned, CPU-only; no pretrained models, no external data.
+# Used by the team with CPython 3.14.4 (Windows 11), 3.14.7 (macOS) and Python 3.14 (Linux, Fedora 43).
 numpy==2.4.6
 scipy==1.17.1
 pandas==2.3.3
 pyarrow==24.0.0
 scikit-learn==1.9.0
+joblib==1.6.0
 sparse_dot_topn==1.2.0
 rapidfuzz==3.14.6
 ftfy==6.3.1

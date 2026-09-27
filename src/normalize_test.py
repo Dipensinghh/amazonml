@@ -5,7 +5,7 @@ folders so it can read the main checkout's dataset/ from a worktree, and it neve
 overwrites an existing file.
 
 Usage:
-  python src/normalize_test.py --root C:/Users/sdipe/amazonmlchallenge
+  python src/normalize_test.py --root .
 Writes <root>/artifacts/test_s{1,2,3}_norm.parquet (same names as common.norm_path).
 """
 import argparse
