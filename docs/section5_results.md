@@ -11,11 +11,10 @@ this set is 0.9293.
 
 ### 5.1 Model lineup
 
-**Current best: v4r-600k** (`models/r1_600k`): LightGBM on forward ∪ reverse-retrieval candidates, 44
-features, 600,000 fitting S1s, 255 leaves, 2,978 trees, validation-tuned threshold 0.70. Validation macro
-F0.5 **0.9561** (US 0.9658, India 0.9418). Its 200k-S1 sibling v4r scored **0.9421** on the public
-leaderboard. The final threshold is being chosen with two public probes of v4r (t = 0.62 and 0.78);
-both models' validation-tuned threshold is 0.70, so the winning shift carries over.
+**Final model: v4r-600k** (`models/r1_600k`): LightGBM on forward ∪ reverse-retrieval candidates, 44
+features, 600,000 fitting S1s, 255 leaves, 2,978 trees. Validation macro F0.5 **0.9561** (US 0.9658,
+India 0.9418) at its validation-tuned threshold 0.70, public leaderboard **0.9465** at 0.70. The final
+threshold is **0.78**, chosen from two public probes of v4r (section 5.2); its public score is pending.
 
 All models are LightGBM binary classifiers scored on val50k with a single threshold tuned after global
 target ownership. v1 to v3 use the frozen blocking-v3 candidates (K = 10 per source); v4r adds
@@ -33,7 +32,7 @@ v3 and v4r-600k on 600,000 fitting S1s (the extra 400k drawn reproducibly by `fi
 | v2cq_fix | 43, leading-zero fix | 255 / 1503 | 0.9394 | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | |
 | **v3** | 43, as v2cq_fix; 600k fit S1s | 255 / 2554 | **0.9423** | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | **0.9285** (Submission 3) |
 | **v4r** (`models/r1_full`) | 44 = v2cq_fix + `from_reverse`; forward ∪ reverse candidates | 255 / 1372 | **0.9531** | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | **0.9421** (Submission 4) |
-| **v4r-600k** (`models/r1_600k`) | 44, as v4r; 600k fit S1s | 255 / 2978 | **0.9561** | 0.70 | 0.9658 | 0.9418 | 0.9860 / 0.9142 | 0.9367 | _pending_ |
+| **v4r-600k** (`models/r1_600k`) | 44, as v4r; 600k fit S1s | 255 / 2978 | **0.9561** | 0.70 | 0.9658 | 0.9418 | 0.9860 / 0.9142 | 0.9367 | **0.9465** (Submission 5, t = 0.70) |
 
 Predicting no matches scores 0.054 on val50k. The candidate recall ceiling is 0.9293 for the forward
 candidates (US 0.9621, India 0.8806) and 0.9578 with reverse retrieval (US 0.9777, India 0.9281); every
@@ -70,10 +69,10 @@ model sits below its ceiling.
   (0.9369 → 0.9418) and recall (0.9106 → 0.9142), and singleton accuracy recovers (0.9301 → 0.9367;
   171 false merges). The run used 2,978 of its 3,000-tree cap, so it had not fully converged.
 
-**Validation vs public.** The fallback's public score matched validation (0.658 vs 0.6561); both
-LightGBM models submitted so far lost about 0.01 (v1b 0.9262 → 0.9164; v3 0.9423 → 0.9285; v4r
-0.9531 → 0.9421), a consistent gap that keeps the validation ranking usable for model choice: the public
-order of the three matches their validation order. Likely contributors: France (15% of test S1s, no labels, unseen in
+**Validation vs public.** The fallback's public score matched validation (0.658 vs 0.6561); every
+LightGBM model lost about 0.01 (v1b 0.9262 → 0.9164; v3 0.9423 → 0.9285; v4r 0.9531 → 0.9421;
+v4r-600k 0.9561 → 0.9465), a consistent gap that keeps the validation ranking usable for model choice:
+the public order of the four matches their validation order. Likely contributors: France (15% of test S1s, no labels, unseen in
 training) and denser competition for targets at test scale. On test, v4r predicts 3.23 matches per S1
 with 6.14% of S1s empty; France alone gets 3.32 matches per S1 with 5.53% empty, close to the training
 rates (3.46 matches, 5.6% singletons), which suggests the model is not collapsing on the unseen country.
@@ -101,11 +100,16 @@ further, to avoid fitting the public subset.
 
 | v4r threshold | matches per S1 | empty S1s | public F0.5 |
 |---|---|---|---|
-| 0.62 | 3.277 | 5.96% | _pending_ |
+| 0.62 | 3.277 | 5.96% | 0.9401 (−0.0021) |
 | 0.70 (validation-tuned) | 3.234 | 6.14% | 0.9421 |
-| 0.78 | 3.181 | 6.37% | _pending_ |
+| 0.78 | 3.181 | 6.37% | **0.9431** (+0.0010) |
 
-Final threshold: _pending_.
+The public score rises monotonically with the threshold across the three points, and 0.78 beats 0.70
+by 0.0010, above the pre-set bar, so the final threshold is **0.78** (applied to v4r-600k without
+retraining). A higher threshold trading recall for precision fits the steady validation-to-public drop:
+the test set, with unseen France and 1.73M S1s competing for targets, appears to punish false merges more
+than validation does. The margin is small and measured on the public subset only, so no further
+thresholds were probed.
 
 **Fewer candidates (K = 5 per source).** Cutting candidates from 23.7 to 9.6 per S1 costs 0.018
 (v1: 0.9256 → 0.9074). K = 10 was kept.
