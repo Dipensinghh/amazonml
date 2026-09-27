@@ -9,73 +9,83 @@ positive). Evaluated on `cand_val50k` (1,183,283 pairs) over the exact 50,000 va
 Macro F0.5 is computed over all 50,000 S1s after global target ownership; the blocking recall ceiling on
 this set is 0.9293.
 
-### 5.1 Headline (best config: LightGBM, 40 features, `num_leaves=255`, 1,648 trees, t = 0.70)
+### 5.1 Model lineup
 
-| metric | value |
-|---|---|
-| **Macro F0.5 (validation)** | **0.9326** |
-| US / India | 0.9491 (29,914 S1s) / 0.9079 (20,086 S1s) |
-| Pair precision / pair recall (after ownership) | 0.9833 / 0.8602 |
-| Blocking recall ceiling | 0.9293 |
-| Singleton accuracy (2,702 true singletons) | 0.9178 |
-| Avg predicted matches per S1 | 3.03 (true: 3.46) |
-| Rules fallback, same candidates (A) | 0.6561 val / 0.658 public leaderboard |
-| Predict nothing | 0.054 |
+All models are LightGBM binary classifiers on the frozen v3 candidates (K = 10 per source), fitted on
+fit200k and scored on val50k, with a single threshold tuned after global target ownership.
+`rev_*` = the three cross-S1 competition features (`rev_rank`, `rev_count`, `rev_score_gap`).
 
-The fallback's public score (0.658) matched its validation score (0.6561), which supports using this
-validation set to choose the model. France has no labels, so no French accuracy is reported.
+| model | features | leaves / trees | val F0.5 | t | US | India | pair P / R | singleton acc. | public |
+|---|---|---|---|---|---|---|---|---|---|
+| rules fallback (A) | 3 lexical scores | – | 0.6561 | 0.85 | | | | | **0.658** |
+| v1 | 43 (rev_* per candidate file) | 31 / 800 | 0.9256 | 0.71 | 0.9439 | 0.8984 | 0.9794 / 0.8504 | 0.9175 | |
+| v1b | 40 (no rev_*) | 31 / 800 | 0.9262 | 0.68 | 0.9448 | 0.8985 | 0.9813 / 0.8478 | 0.9171 | **0.9164** |
+| v2q | 40 (no rev_*) | 255 / 1648 | 0.9326 | 0.70 | 0.9491 | 0.9079 | 0.9833 / 0.8602 | 0.9178 | |
+| v2cq | 43 (rev_* over all 2.2M train S1s) | 255 / 1661 | 0.9370 | 0.68 | 0.9529 | 0.9133 | 0.9825 / 0.8763 | 0.9130 | |
+| **v2cq_fix** | 43, leading-zero fix | 255 / 1503 | **0.9394** | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | Submission 3 (pending) |
 
-### 5.2 Model selection
+Predicting no matches scores 0.054 on val50k. The blocking recall ceiling is 0.9293 (US 0.9621, India
+0.8806), and every model sits below it.
 
-**Sweep 1** (43 features, up to 800 trees, early stopping 50):
+**What moved the score.**
+- **Supervised model over rules: +0.27.** Same candidates, same ownership policy.
+- **Capacity (v1b → v2q): +0.0064.** 255 leaves with early stopping at 1,648 trees; at 800 trees and 31
+  leaves no run had converged.
+- **Competition features at the right scale (v2q → v2cq): +0.0044.** Computed inside one candidate file,
+  rev_* describe how many of *that file's* S1s want a target, so their scale changes with file size
+  (negative `rev_count` 4.0 on val50k vs 13.2 on fit200k) and they added nothing (v1 0.9256 vs v1b 0.9262).
+  Recomputed over all 2.2M train S1s, the scale of the 1.73M-S1 test set, they help; the share of wrong
+  pairs with `rev_rank = 0` fell from 68.5% to 10.1%.
+- **Leading-zero fix (v2cq → v2cq_fix): +0.0024.** House numbers were compared with their zero padding,
+  so `005705` and `5705` counted as a conflict. After stripping leading zeros, true val pairs flagged
+  with `num_conflict = 1` fell from 11,907 to 7,305 (−38.6%) against −3.9% for non-matches, and singleton
+  accuracy rose from 0.913 to 0.939. The same fix on v2q's 40 features gives 0.9326 → 0.9355.
 
-| config | val F0.5 | threshold | avg matches/S1 | best iter |
-|---|---|---|---|---|
-| baseline (lr 0.05, 31 leaves, min_child_samples 50) | 0.9256 | 0.71 | 3.005 | 800 (cap) |
-| num_leaves=63 | 0.9280 | 0.75 | 2.984 | 800 (cap) |
-| num_leaves=127 | 0.9303 | 0.74 | 3.006 | 800 (cap) |
-| min_child_samples=100 | 0.9257 | 0.69 | 3.023 | 800 (cap) |
-| lr 0.03, up to 2000 trees | 0.9272 | 0.71 | 3.015 | 1999 (cap) |
-| drop 6 low-signal features (37 left) | 0.9245 | 0.71 | 3.004 | 800 (cap) |
-| K=5 candidates (9.6 vs 23.7 per S1) | 0.9074 | 0.71 | 2.822 | 800 (cap) |
+**Validation vs public.** The fallback's public score matched validation (0.658 vs 0.6561); v1b lost
+about 0.01 (0.9164 vs 0.9262). Likely contributors: France (15% of test S1s, no labels, unseen in
+training) and denser competition for targets at test scale.
 
-**Sweep 2** (40 features, up to 3000 trees, early stopping 100):
+### 5.2 Other experiments
 
-| config | val F0.5 | threshold | avg matches/S1 | best iter |
-|---|---|---|---|---|
-| num_leaves=127 | 0.9323 | 0.71 | 3.017 | 2572 (early stop) |
-| **num_leaves=255** | **0.9326** | 0.70 | 3.028 | 1648 (early stop) |
+**Hyperparameter sweep** (D; v1 features, then v1b features, fit200k / val50k):
 
-**v1 vs v1b.** v1 uses all 43 features, including three cross-S1 competition features (`rev_rank`,
-`rev_count`, `rev_score_gap`); v1b drops them (40 features). These features are computed within one
-candidate set, so their scale depends on how many S1s compete: the mean `rev_count` of negatives is 4.0 on
-val50k, 13.2 on fit200k, and would be larger again on the 1.73M-S1 test set. A model trained on one scale
-meets a shifted distribution at inference.
+| config | features | val F0.5 | threshold | avg matches/S1 | best iter |
+|---|---|---|---|---|---|
+| baseline (lr 0.05, 31 leaves, min_child_samples 50) | 43 | 0.9256 | 0.71 | 3.005 | 800 (cap) |
+| num_leaves=63 | 43 | 0.9280 | 0.75 | 2.984 | 800 (cap) |
+| num_leaves=127 | 43 | 0.9303 | 0.74 | 3.006 | 800 (cap) |
+| min_child_samples=100 | 43 | 0.9257 | 0.69 | 3.023 | 800 (cap) |
+| lr 0.03, up to 2000 trees | 43 | 0.9272 | 0.71 | 3.015 | 1999 (cap) |
+| drop 6 low-signal features | 37 | 0.9245 | 0.71 | 3.004 | 800 (cap) |
+| num_leaves=127, up to 3000 trees | 40 | 0.9323 | 0.71 | 3.017 | 2572 (early stop) |
+| num_leaves=255, up to 3000 trees (= v2q) | 40 | 0.9326 | 0.70 | 3.028 | 1648 (early stop) |
 
-| | features | best val F0.5 |
-|---|---|---|
-| v1 (num_leaves=127, 800 trees) | 43 | 0.9303 |
-| v1b (num_leaves=127, 2572 trees) | 40 | 0.9323 |
-| v1b (num_leaves=255, 1648 trees) | 40 | 0.9326 |
+**Fewer candidates (K = 5 per source).** Cutting candidates from 23.7 to 9.6 per S1 costs 0.018
+(v1: 0.9256 → 0.9074). K = 10 was kept.
 
-v1b is at least as good on validation. Tree count changed at the same time, so the comparison does not
-isolate the effect of the rev_* features; it shows that removing the scale-dependent features costs
-nothing measurable, which makes v1b the safer choice for test.
+**Low-signal features.** Six features that looked uninformative on an early development set
+(`name_missing`, `was_non_latin`, `postal_conflict`, `is_s3`, `postal_missing`, `name_alt_token_set`)
+cost 0.0011 when removed, so all were kept.
 
-**Other findings.**
-- **Capacity helped:** more leaves and more trees gave +0.007 over the baseline; no sweep-1 run reached
-  early stopping.
-- **Low-signal features are not dead:** the six features that looked uninformative on an early dev set
-  (`name_missing`, `was_non_latin`, `postal_conflict`, `is_s3`, `postal_missing`, `name_alt_token_set`)
-  cost 0.0011 when removed. All were kept.
-- **K=5 vs K=10:** cutting candidates from 23.7 to 9.6 per S1 costs 0.018 F0.5. The team kept K=10.
-- **Global ownership:** no measurable effect at 50,000 S1s (identical F0.5 with and without, 7 misses
-  caused by it). On A's rules fallback it added +0.051 (0.6049 → 0.6561), because weaker scores collide more.
-  Competition is denser at test scale, so it stays on.
+**Global ownership.** It changes the model scores by at most 0.0001 on val50k (e.g. v2cq_fix 0.9394 vs
+0.9393 without), because 50,000 validation S1s rarely compete for the same target. On the rules fallback,
+whose scores are less confident, it added +0.051 (0.6049 → 0.6561). It stays on for test, where 1.73M
+S1s compete.
+
+**Cross-source corroboration (tried, not adopted).** 85% of matched S1s have matches in both S2 and S3,
+so a true candidate should resemble one of the S1's candidates from the other source. For each pair
+(S1, t) we compared t with the S1's top-5 other-source candidates by final_rank: best name token-set,
+best address token-set, best average of the two, and that partner's rank. The signal is real
+(`xsrc_best_both` 0.87 on true pairs vs 0.59 on non-matches), but on v2q + leading-zero fix it added only
+**+0.0019** (0.9355 → 0.9374): below-threshold misses fell 10.7% (11,153 → 9,959) and pair recall rose
+0.0069, while precision moved −0.0006. It cannot reach pairs that blocking never retrieved, which are half
+of all misses, so it fell short of the +0.004 adoption bar. Cost would have been small (≈38k pairs/s,
+about 18 minutes for the 40.7M test pairs on an 8-core laptop).
 
 ### 5.3 Where the errors come from
 
-Of 173,059 true pairs, 24,194 are missed; of 151,394 predicted pairs, 2,529 are false merges.
+Error analysis was run on v2q (val F0.5 0.9326, t = 0.70), before the leading-zero fix; its findings led
+to that fix. Of 173,059 true pairs, 24,194 are missed; of 151,394 predicted pairs, 2,529 are false merges.
 
 | error type | count | share | notes |
 |---|---|---|---|
@@ -149,20 +159,21 @@ Of 173,059 true pairs, 24,194 are missed; of 151,394 predicted pairs, 2,529 are 
 | 19 | IN | below t | 0.03 | Radha Hospital Limited · Patna | M/s Radha Hospital · (blank) | Blank address: exact core name, very low score |
 | 20 | IN | not retrieved | – | Jain International LLP · No. 77, Ramanagara | International Jain Jain · No. 77, Ramanagara | Reordered, duplicated name; partial address |
 
-### 5.6 What to fix next, in order of expected gain
+### 5.6 Follow-up on the error analysis
 
-1. **Retrieval for India** (half of all misses, two-thirds from India): a channel for short, truncated
-   addresses — e.g. name tokens combined with city — would recover pairs the model never sees.
-2. **Zero-padded numbers in `features.py`**: strip leading zeros before `num_agree` / `num_conflict`.
-   Cheap, and it removes a false conflict from 4,602 true pairs.
-3. **Blank-address pairs**: only 22.8% are recalled. A separate threshold, or features comparing the
-   candidate's name with the other candidates of the same S1, could help without adding false merges.
-4. **Twins**: most false merges are same-name records at a neighbouring number. A feature for the
-   numeric distance between house numbers (rather than equal / not equal) targets them directly.
+1. **Zero-padded house numbers — fixed** (v2cq → v2cq_fix, +0.0024; section 5.1).
+2. **Retrieval, mostly India — the largest remaining gap.** Half of all misses were never retrieved, and
+   68% of those are India. A reverse-retrieval line (searching from targets back to S1s) raises the
+   candidate recall ceiling from 0.929 to 0.958 in validation; its model results are pending.
+3. **Blank-address pairs.** Only 22.8% of true pairs with a blank candidate address are recalled.
+   Cross-source corroboration was aimed partly at these and gave +0.0019 (section 5.2).
+4. **Twins.** Most false merges are same-name records at a neighbouring house number; a numeric-distance
+   feature between house numbers is the untested next step.
 
 ### 5.7 Limitations
 
-- Threshold and early stopping use the same validation labels, so 0.9326 is a tuned score.
+- Threshold and early stopping use the same validation labels, so all validation scores are tuned
+  scores; v1b lost about 0.01 from validation to the public leaderboard.
 - Validation has 50,000 S1s competing for targets against 1.73M at test, so ownership is tested far less
   than it will be used.
 - France is unlabelled; only coverage and score distributions can be checked there.
