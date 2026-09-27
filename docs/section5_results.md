@@ -102,7 +102,7 @@ further, to avoid fitting the public subset.
 | v4r threshold | matches per S1 | empty S1s | public F0.5 |
 |---|---|---|---|
 | 0.62 | 3.277 | 5.96% | _pending_ |
-| 0.70 (validation-tuned) | 3.232 | 6.14% | 0.9421 |
+| 0.70 (validation-tuned) | 3.234 | 6.14% | 0.9421 |
 | 0.78 | 3.181 | 6.37% | _pending_ |
 
 Final threshold: _pending_.
