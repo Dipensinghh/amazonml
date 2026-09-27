@@ -256,6 +256,24 @@ Fit: `cand_fit200k_features.parquet` (4,732,479 pairs, 200,000 fitting S1s, 43 f
 
 Not yet done: num_leaves=127 combined with more trees/lower lr (the two best single changes weren't combined), full validation report (per-country, pair P/R, singleton accuracy) on the winning config, refit on all labeled S1s, scoring `cand_test.parquet`.
 
+### D: sweep 2 — stacked capacity, without rev_* features (v1b, 2026-09-27)
+
+Same fit (cand_fit200k, 200k S1s) and val scope (val50k, 50k S1s) as sweep 1. 40 features: the 43 minus
+`rev_rank`, `rev_count`, `rev_score_gap` (B flagged these as scale-dependent: negative `rev_count` 4.0 on
+val50k vs 13.2 on fit200k, larger again on test). Up to 3000 trees, early stopping 100 on val log loss.
+
+| config | features | val F0.5 | threshold | avg matches/S1 | best iter | stopped | runtime |
+|---|---|---|---|---|---|---|---|
+| leaves=127, up to 3000 trees | 40 | 0.9323 | 0.71 | 3.017 | 2572 | early | 402s |
+| **leaves=255, up to 3000 trees** | 40 | **0.9326** | 0.70 | 3.028 | 1648 | early | 359s |
+| (sweep 1 ref) leaves=127, 800 trees | 43 | 0.9303 | 0.74 | 3.006 | 800 | hit cap | 310s |
+
+Stacking helps: +0.0020 (leaves 127) and +0.0023 (leaves 255) over sweep 1's winner, and both now
+converge (early stop at 2572 / 1648). leaves 255 vs 127 is +0.0003 — within noise; 255 gets there in
+~36% fewer trees. Dropping the three rev_* features did not hurt. Caveat: trees and features changed
+together, so this does not isolate the rev_* effect; it does show a model without the scale-dependent
+features is at least as good on val, which makes it the safer choice for test (1.73M S1s).
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
