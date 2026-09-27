@@ -1,5 +1,6 @@
 """scripts/build_zip.py on a tiny fake submission folder (temp dir only; packs the committed HEAD)."""
 import hashlib
+import re
 import subprocess
 import sys
 import zipfile
@@ -34,8 +35,16 @@ def _git_show(path: str) -> bytes:
     return subprocess.run(["git", "-C", str(REPO), "show", f"HEAD:{path}"], capture_output=True, check=True).stdout
 
 
+def _model_dir() -> str:
+    """MODEL_DIR of the committed package run.py (the shipped model folder)."""
+    m = re.search(r'^MODEL_DIR = "([^"]+)"', _git_show("code/business_entity_resolution/run.py").decode(), re.M)
+    assert m, "run.py must define MODEL_DIR"
+    return m.group(1)
+
+
 def test_build_zip_layout(tmp_path, capsys):
     """Zip has output/ TSVs, the committed package (no caches) and the documentation renamed."""
+    md = _model_dir()
     z = B.build(_sub(tmp_path), "Commit&Pray", "HEAD", tmp_path / "out", overwrite=False)
     assert z.name == "Commit&Pray_submission.zip"
     B.list_zip(z)
@@ -47,12 +56,12 @@ def test_build_zip_layout(tmp_path, capsys):
         assert zf.read("Documentation_template.md") == _git_show("Documentation_filled.md")
         pkg = [n for n in names if n.startswith("code/business_entity_resolution/")]
         for need in ("README.md", "requirements.txt", "run.py", "src/score_test.py", "src/features.py",
-                     "models/v3/lgbm.txt", "models/v3/bundle.json", "artifacts/addr_tfidf.joblib"):
+                     f"{md}/lgbm.txt", f"{md}/bundle.json", "artifacts/addr_tfidf.joblib"):
             assert f"code/business_entity_resolution/{need}" in names, need
         assert not [n for n in names if "__pycache__" in n or n.endswith((".pyc", ".pyo"))]
         assert set(names) == {"output/matching_results.tsv", "output/candidate_pairs.tsv",
                               "Documentation_template.md", *pkg}
-        for n in ("code/business_entity_resolution/run.py", "code/business_entity_resolution/models/v3/bundle.json"):
+        for n in ("code/business_entity_resolution/run.py", f"code/business_entity_resolution/{md}/bundle.json"):
             assert zf.read(n) == _git_show(n)
 
 
