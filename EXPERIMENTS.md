@@ -363,6 +363,24 @@ num_agree changed on 23,307 rows; num_missing unchanged. Checks: only num_agree 
 the original file; row order and schema identical; values identical to a fresh `features.py` build on
 20,000 pairs. Model impact not yet measured (needs a retrain on patched fit200k).
 
+### D: cross-source corroboration features (xsrc_*) (2026-09-27)
+
+For each pair (S1, t): compare t with the S1's top-5 candidates from the other source (by final_rank) —
+`xsrc_best_name` / `xsrc_best_addr` (max token_set on name_core / addr_norm), `xsrc_best_both` (max of their
+mean), `xsrc_partner_rank`. `src/xsrc_features.py`: 31 s / 1.9 GB on val50k (38k pairs/s end to end, 8-core Mac), 101 s on fit200k; ~18 min estimated for 40.7M test pairs.
+Separation on val50k: `xsrc_best_both` 0.870 true vs 0.588 non-match. Experiment `src/exp_xsrc.py`:
+fit200k / val50k, 40 base features (no rev_*), leading-zero-fixed num_*, 255 leaves, up to 3000 trees.
+
+| | features | val F0.5 | t | US | India | pair P / R | below-t misses | best iter |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 40 | 0.9355 | 0.70 | 0.9526 | 0.9101 | 0.9841 / 0.8648 | 11,153 | 1692 |
+| + xsrc | 44 | 0.9374 | 0.68 | 0.9547 | 0.9117 | 0.9835 / 0.8717 | 9,959 (-1,194) | 1862 |
+
++0.0019 F0.5: below the adoption bar (+0.004), not adopted. Below-threshold misses fall 10.7% (US -741, India -453)
+and pair recall rises 0.0069, but half of all misses are unretrieved pairs, which no pair feature can
+recover. Gain rank of the new features: 20 / 25 / 27 / 32 of 44.
+Side result: the leading-zero fix alone moves this 40-feature config from 0.9326 to 0.9355 (+0.0029).
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
