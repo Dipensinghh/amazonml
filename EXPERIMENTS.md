@@ -238,6 +238,24 @@ Fit: `dev_candidates_fit_features.parquet` (468,900 pairs, 20,000 fitting S1s). 
 LightGBM beats the rules by +0.047 on identical pairs. Ownership effect: 0 (collision rate 0.0 at 5,000 S1s). Top gain: `addr_phon_token_set`, `addr_norm_token_set` (address dominates), then `name_norm_token_sort`, address TF-IDF, `num_conflict`.
 Caveat: not comparable to E01 (0.662) - those were real top-k candidates with 93% recall; this set has 100% recall and easier negatives. Threshold 0.73 is not usable. Redo on C's real candidates.
 
+### D: LightGBM config sweep on real v3 candidates + features (2026-09-27)
+
+Fit: `cand_fit200k_features.parquet` (4,732,479 pairs, 200,000 fitting S1s, 43 features). Validation: `cand_val50k_features.parquet` (1,183,283 pairs, exact 50,000-S1 scope from `val50k_s1_ids.parquet`; 0 scope S1s with zero candidates). Threshold swept 0.10-0.95 + refine, global ownership applied. Ownership had zero effect at this scale (0 collisions among 50k S1s) — matches A's 0.6561=0.6561 pattern on the fallback; expect it to matter more at test's 1.73M S1 scale.
+
+| config | val F0.5 | threshold | avg matches/S1 | best iter | runtime |
+|---|---|---|---|---|---|
+| playbook baseline (n_est 800, lr 0.05, leaves 31) | 0.9256 | 0.71 | 3.005 | 800 (no early stop) | 226s |
+| num_leaves=63 | 0.9280 | 0.75 | 2.984 | 800 | 270s |
+| **num_leaves=127** | **0.9303** | 0.74 | 3.006 | 800 | 310s |
+| min_child_samples=100 | 0.9257 | 0.69 | 3.023 | 800 | 270s |
+| lr=0.03, n_estimators=2000 | 0.9272 | 0.71 | 3.015 | 1999 (still improving) | 654s |
+| drop 6 dead features (name_missing, was_non_latin, postal_conflict, is_s3, postal_missing, name_alt_token_set; 37 left) | 0.9245 | 0.71 | 3.004 | 800 | 291s |
+| K=5 candidates (final_rank<=5 + blank-index; 480,572 val pairs, 9.61 cands/S1 vs 23.67 at K=10; same baseline model config) | 0.9074 | 0.71 | 2.822 | 800 | 218s |
+
+**All 6 real configs beat A's fallback (0.6561) by +0.27 to +0.30.** num_leaves=127 is the best single change (+0.0047 over baseline). None of these hit early stopping at 800 trees except the 2000-tree run (which also hadn't converged) — more trees or leaves may still help; not swept further here due to the 15:30 deadline. Dropping the 6 "dead" features (dead on the unrealistic dev set) cost -0.0011 — they are not dead on real candidates, keep them. K=5 costs -0.0182 F0.5 for less than half the candidates (9.6 vs 23.7/S1) — a real recall/efficiency trade-off for the team to weigh against the candidate-count judging criterion, not a free win.
+
+Not yet done: num_leaves=127 combined with more trees/lower lr (the two best single changes weren't combined), full validation report (per-country, pair P/R, singleton accuracy) on the winning config, refit on all labeled S1s, scoring `cand_test.parquet`.
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
