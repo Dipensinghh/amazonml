@@ -301,6 +301,68 @@ likely worth a little. Precision (0.98) far exceeds recall (0.85, ceiling 0.93):
 already favours precision as F0.5 wants. India trails US by ~0.046. Cutting to K=5 per source
 costs ~0.018 F0.5 for 60% fewer candidates.
 
+### D: LightGBM config sweep on real v3 candidates + features (2026-09-27)
+
+Fit: `cand_fit200k_features.parquet` (4,732,479 pairs, 200,000 fitting S1s, 43 features). Validation: `cand_val50k_features.parquet` (1,183,283 pairs, exact 50,000-S1 scope from `val50k_s1_ids.parquet`; 0 scope S1s with zero candidates). Threshold swept 0.10-0.95 + refine, global ownership applied. Ownership had zero effect at this scale (0 collisions among 50k S1s) — matches A's 0.6561=0.6561 pattern on the fallback; expect it to matter more at test's 1.73M S1 scale.
+
+| config | val F0.5 | threshold | avg matches/S1 | best iter | runtime |
+|---|---|---|---|---|---|
+| playbook baseline (n_est 800, lr 0.05, leaves 31) | 0.9256 | 0.71 | 3.005 | 800 (no early stop) | 226s |
+| num_leaves=63 | 0.9280 | 0.75 | 2.984 | 800 | 270s |
+| **num_leaves=127** | **0.9303** | 0.74 | 3.006 | 800 | 310s |
+| min_child_samples=100 | 0.9257 | 0.69 | 3.023 | 800 | 270s |
+| lr=0.03, n_estimators=2000 | 0.9272 | 0.71 | 3.015 | 1999 (still improving) | 654s |
+| drop 6 dead features (name_missing, was_non_latin, postal_conflict, is_s3, postal_missing, name_alt_token_set; 37 left) | 0.9245 | 0.71 | 3.004 | 800 | 291s |
+| K=5 candidates (final_rank<=5 + blank-index; 480,572 val pairs, 9.61 cands/S1 vs 23.67 at K=10; same baseline model config) | 0.9074 | 0.71 | 2.822 | 800 | 218s |
+
+**All 6 real configs beat A's fallback (0.6561) by +0.27 to +0.30.** num_leaves=127 is the best single change (+0.0047 over baseline). None of these hit early stopping at 800 trees except the 2000-tree run (which also hadn't converged) — more trees or leaves may still help; not swept further here due to the 15:30 deadline. Dropping the 6 "dead" features (dead on the unrealistic dev set) cost -0.0011 — they are not dead on real candidates, keep them. K=5 costs -0.0182 F0.5 for less than half the candidates (9.6 vs 23.7/S1) — a real recall/efficiency trade-off for the team to weigh against the candidate-count judging criterion, not a free win.
+
+Not yet done: num_leaves=127 combined with more trees/lower lr (the two best single changes weren't combined), full validation report (per-country, pair P/R, singleton accuracy) on the winning config, refit on all labeled S1s, scoring `cand_test.parquet`.
+
+### D: sweep 2 — stacked capacity, without rev_* features (v1b, 2026-09-27)
+
+Same fit (cand_fit200k, 200k S1s) and val scope (val50k, 50k S1s) as sweep 1. 40 features: the 43 minus
+`rev_rank`, `rev_count`, `rev_score_gap` (B flagged these as scale-dependent: negative `rev_count` 4.0 on
+val50k vs 13.2 on fit200k, larger again on test). Up to 3000 trees, early stopping 100 on val log loss.
+
+| config | features | val F0.5 | threshold | avg matches/S1 | best iter | stopped | runtime |
+|---|---|---|---|---|---|---|---|
+| leaves=127, up to 3000 trees | 40 | 0.9323 | 0.71 | 3.017 | 2572 | early | 402s |
+| **leaves=255, up to 3000 trees** | 40 | **0.9326** | 0.70 | 3.028 | 1648 | early | 359s |
+| (sweep 1 ref) leaves=127, 800 trees | 43 | 0.9303 | 0.74 | 3.006 | 800 | hit cap | 310s |
+
+Stacking helps: +0.0020 (leaves 127) and +0.0023 (leaves 255) over sweep 1's winner, and both now
+converge (early stop at 2572 / 1648). leaves 255 vs 127 is +0.0003 — within noise; 255 gets there in
+~36% fewer trees. Dropping the three rev_* features did not hurt. Caveat: trees and features changed
+together, so this does not isolate the rev_* effect; it does show a model without the scale-dependent
+features is at least as good on val, which makes it the safer choice for test (1.73M S1s).
+
+### D: error analysis of the best config (2026-09-27)
+
+`src/error_analysis.py`: refit leaves=255, 1648 trees, 40 features; t = 0.70 on val50k. Macro F0.5 0.9326
+(US 0.9491 / India 0.9079), pair P/R 0.9833 / 0.8602 (ceiling 0.9293), singleton accuracy 0.9178.
+Misses 24,194: not retrieved 12,237 (68% India), below t 11,950 (41% blank candidate address), lost to
+ownership 7. False merges 2,529: distractors 1,690, another S1's target 839; 60% near-identical names.
+Zero-padded house numbers cause 38.6% of `num_conflict` flags on true pairs (3.9% on non-matches).
+Full write-up with 20 + 20 examples: `docs/section5_results.md`.
+
+### D: leading-zero fix for house-number features (2026-09-27)
+
+`features.num_features` compares `addr_nums` tokens with leading zeros stripped (`005705` == `5705`);
+postal tokens are unchanged. `src/patch_num_features.py` recomputes only num_agree / num_conflict /
+num_missing in an existing feature parquet with that same function (streamed, row order and schema kept).
+
+cand_val50k (1,183,283 pairs), 7 s, 0.6 GB peak:
+
+| | num_conflict before | after | change |
+|---|---|---|---|
+| true pairs | 11,907 | 7,305 | -4,602 (-38.6%) |
+| non-matches | 382,269 | 367,231 | -15,038 (-3.9%) |
+
+num_agree changed on 23,307 rows; num_missing unchanged. Checks: only num_agree / num_conflict differ from
+the original file; row order and schema identical; values identical to a fresh `features.py` build on
+20,000 pairs. Model impact not yet measured (needs a retrain on patched fit200k).
+
 ## Submissions
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
