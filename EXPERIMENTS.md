@@ -234,3 +234,35 @@ Machine: 36 GiB RAM, 14 logical CPUs, Python 3.14.7. Command:
 B's current feature builder retains the full candidate DataFrame, referenced corpus rows, and
 all output chunks until the final write, but the measured full run fits safely on the 36 GiB
 Mac. A streaming rewrite is not needed for this submission.
+
+## Model
+
+| date | config | val F0.5 | US | India | France | threshold | runtime | notes |
+|------|--------|----------|----|-------|--------|-----------|---------|-------|
+
+### D: scoring, split and rules fallback (E00-E01)
+
+| Run | Question | Setup | Result | Decision |
+|---|---|---|---|---|
+| E00 | Are scoring/split correct? | toy asserts (0.714 example, singleton rules); split = team split artifacts/split_train.parquet (blocking.make_split, seed 42, default_rng, round) = 441,364 val S1s (my earlier RandomState/ceil split dropped to stay consistent with C's candidates) | asserts pass; all-empty baseline macro F0.5 ~= 0.056 on val | metric + split frozen |
+| E01 (`src/fallback_e01.py`) | Does a rules fallback work? | 2,000 random val S1s (seed 42) vs ALL train S2/S3 of same country+source; word TF-IDF (max_df 0.02) name top-10 + address top-10 union; score = w*name_cos + (1-w)*addr_cos (addr blank -> name only); global ownership; one threshold | pair recall 0.930, 37.9 cands/S1 (75,862 pairs); best w_name 0.2 -> t 0.73, **macro F0.5 0.662** (w 0.5: 0.646, w 0.0: 0.619); US 0.706 / India 0.574; ownership effect +0.001 (collision rate 0.2%, thin competition at 2k S1s); runtime 167 s, peak RSS 2.7 GB | fallback ready as a floor; LightGBM must beat 0.662 on the same candidates |
+
+Limits of E01: 2,000-S1 sample (noisy, thin ownership competition); own light normalisation (not B's); word-level retrieval (not C's trigram channels); no acronym channel; names made only of common tokens get no name candidates.
+
+### D: first LightGBM on B's dev feature sets (E03 preview, NOT a real result)
+
+Fit: `dev_candidates_fit_features.parquet` (468,900 pairs, 20,000 fitting S1s). Validation: `dev_candidates_features.parquet` (117,287 pairs, 5,000 val S1s; 14.7% positive; 100% true-match recall; negatives are token-overlap, only 81 random-pool). 31 base features, playbook params, early stop at 727 trees (val log loss 0.0130).
+
+| model (same 117,287 val pairs) | macro F0.5 | threshold |
+|---|---|---|
+| all-empty | 0.060 | - |
+| rules: 0.4*name_core_jw + 0.6*addr_norm_tfidf | 0.935 | 0.59 |
+| LightGBM | **0.981** | 0.73 |
+
+LightGBM beats the rules by +0.047 on identical pairs. Ownership effect: 0 (collision rate 0.0 at 5,000 S1s). Top gain: `addr_phon_token_set`, `addr_norm_token_set` (address dominates), then `name_norm_token_sort`, address TF-IDF, `num_conflict`.
+Caveat: not comparable to E01 (0.662) - those were real top-k candidates with 93% recall; this set has 100% recall and easier negatives. Threshold 0.73 is not usable. Redo on C's real candidates.
+
+## Submissions
+
+| date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
+|------|------------------|----------------|--------------|--------------|
