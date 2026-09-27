@@ -239,6 +239,8 @@ Mac. A streaming rewrite is not needed for this submission.
 
 | date | config | val F0.5 | US | India | France | threshold | runtime | notes |
 |------|--------|----------|----|-------|--------|-----------|---------|-------|
+| 2026-09-27 | v1: LGBM 43 feats, fit200k → val50k | 0.9256 | 0.9439 | 0.8984 | n/a | 0.71 | 2.4 min, 5.2 GB | 800 trees, no early stop |
+| 2026-09-27 | v1b: v1 minus rev_rank/rev_count/rev_score_gap (40) | **0.9262** | 0.9448 | 0.8985 | n/a | 0.68 | 2.8 min, 4.5 GB | 800 trees, no early stop |
 
 ### D: scoring, split and rules fallback (E00-E01)
 
@@ -261,6 +263,43 @@ Fit: `dev_candidates_fit_features.parquet` (468,900 pairs, 20,000 fitting S1s). 
 
 LightGBM beats the rules by +0.047 on identical pairs. Ownership effect: 0 (collision rate 0.0 at 5,000 S1s). Top gain: `addr_phon_token_set`, `addr_norm_token_set` (address dominates), then `name_norm_token_sort`, address TF-IDF, `num_conflict`.
 Caveat: not comparable to E01 (0.662) - those were real top-k candidates with 93% recall; this set has 100% recall and easier negatives. Threshold 0.73 is not usable. Redo on C's real candidates.
+
+### D: LightGBM v1 / v1b on the frozen blocking candidates (E04)
+
+Data: `cand_fit200k_features.parquet` (4,732,479 pairs, 200k fitting S1, 13.6% positive) and
+`cand_val50k_features.parquet` (1,183,283 pairs, 13.6% positive), built by `features.py --labels`
+(43 features via `feature_columns()`, no NaN/inf, rows = input rows; `name_missing` constant in
+both; cached `addr_tfidf.joblib` sha256 7a9d6370…249e3, not refit). Scope: exactly
+`artifacts/val50k_s1_ids.parquet` (50,000 S1, 2,702 singletons, 0 without candidates;
+blocking pair-recall ceiling 0.929). Params: 800 trees, lr 0.05, 31 leaves,
+min_child_samples 50, early stop 50 on val log loss. Models: `models/v1`, `models/v1b`
+(lgbm.txt + bundle.json with ordered features, best_iteration, threshold; val_report.json).
+
+| metric (val50k, global ownership) | v1 (43) | v1b (40, no rev_*) | fallback |
+|---|---|---|---|
+| macro F0.5 with ownership | 0.9256 | **0.9262** | 0.6561 |
+| macro F0.5 without ownership | 0.9256 | 0.9261 | |
+| threshold | 0.71 | 0.68 | |
+| US / India | 0.9439 / 0.8984 | 0.9448 / 0.8985 | |
+| pair precision / recall | 0.9794 / 0.8504 | 0.9813 / 0.8478 | |
+| singleton accuracy | 0.9175 (223 false merges / 2,702) | 0.9171 (224) | |
+| avg predicted matches per S1 | 3.01 | 2.99 | (gold 3.46) |
+| val log loss @ 800 | 0.03587 | 0.03465 | |
+| K=5 re-score (9.6 cands/S1) | 0.9074 | 0.9078 | |
+| ownership collision rate | 0.005% | 0.012% | |
+
+Top-15 gain (v1): addr_phon_token_set, retr_rank, name_norm_partial, num_agree, addr_phon_tfidf,
+name_norm_jw, name_norm_token_sort, name_phon_jw, addr_norm_token_set, name_core_partial,
+rank_frac, addr_norm_tfidf, num_conflict, name_core_ratio, name_phon_token_sort.
+v1b: same set, near-identical order (name_norm_jw and addr_phon_tfidf swap; name_core_ratio above num_conflict).
+
+Findings: LightGBM +0.27 over the fallback. Dropping the rev_* competition features costs
+nothing (v1b ≥ v1): computed within a 200k/50k candidate file they see much thinner competition
+than on the full test set, so v1b is the safer choice until they are computed over all S1s
+(cand_trainall). Neither run early-stopped — both still improving at 800 trees; more trees are
+likely worth a little. Precision (0.98) far exceeds recall (0.85, ceiling 0.93): threshold
+already favours precision as F0.5 wants. India trails US by ~0.046. Cutting to K=5 per source
+costs ~0.018 F0.5 for 60% fewer candidates.
 
 ## Submissions
 
