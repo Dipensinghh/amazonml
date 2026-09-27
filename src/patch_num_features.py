@@ -1,5 +1,5 @@
 """Recompute only num_agree / num_conflict / num_missing in an existing feature parquet, using
-features.num_features (leading zeros stripped), instead of rebuilding all 43 features.
+features.num_features (leading zeros stripped), instead of rebuilding every feature.
 
 Streams the file in record batches and writes a new parquet with the same columns, column order and row
 order; every other column is copied unchanged. Only entity_id + addr_nums of the referenced normalized

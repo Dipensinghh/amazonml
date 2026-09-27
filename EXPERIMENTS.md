@@ -367,6 +367,8 @@ the original file; row order and schema identical; values identical to a fresh `
 
 | date | leaderboard F0.5 | local val F0.5 | avg cands/S1 | what changed |
 |------|------------------|----------------|--------------|--------------|
+| 2026-09-27 | 0.6580 | 0.6561 | 23.49 | rule-based fallback |
+| 2026-09-27 | 0.9164 | 0.9262 | 23.49 | v1b LightGBM, 40 features |
 
 ---
 
@@ -449,3 +451,40 @@ On the 4.73M cand_fit200k rows (all found in trainall), sample-level vs whole-po
 
 rev_rank==0 share: label 0 0.685 → 0.101, label 1 0.998 → 0.991. The fit200k features
 understate competition by ~10x, so train on these full values when rev_* features are used.
+
+---
+
+## 2026-09-27 — Production reverse R=1 union and model (Role C)
+
+The frozen forward candidates were unioned with each target's deterministic top-1 S1 from the
+same country-specific token-pair index. Forward evidence is retained on overlap; reverse-only
+pairs carry the reverse token/name scores. `final_rank` and all list-dependent features are
+recomputed over the union, and `from_reverse` records reverse discovery.
+
+| artifact | pairs | candidates/S1 | reverse-only pairs |
+|---|---:|---:|---:|
+| trainall R=1 | 53,163,079 | 24.09 | 943,117 |
+| fit200k R=1 | 4,819,000 | 24.10 | — |
+| val50k R=1 | 1,205,167 | 24.10 | 21,884 |
+| test R=1 | 41,955,111 | 24.22 | 1,258,272 |
+
+The exact val50k retrieval recall is 0.9578 overall (US 0.9777, India 0.9281), versus 0.9293
+for frozen forward retrieval. All 6,024,167 fit/validation feature rows passed pair-order,
+no-null, and finite-value checks. Features use the leading-zero number fix and the same address
+TF-IDF artifact (`7a9d6370acc9eb3e55625c7e8d4a55b81e91f3320a9484f27c5a9098a30249e3`).
+
+Both models used 200k fitting S1s, the exact seeded 50k validation scope, 255 leaves, learning
+rate 0.05, at most 3000 trees, and early stopping 100. Thresholds include global ownership.
+
+| model | features | best iteration | threshold | val F0.5 | US | India |
+|---|---:|---:|---:|---:|---:|---:|
+| R=1 with full-population rev_* | 44 | 1372 | 0.70 | **0.9531** | 0.9640 | 0.9369 |
+| R=1 without rev_* | 41 | 1378 | 0.69 | 0.9527 | 0.9634 | 0.9367 |
+| forward v2cq_fix reference | 43 | 1503 | 0.73 | 0.9394 | 0.9561 | 0.9145 |
+
+The full-population competition version wins and is the Submission 4 model. Its validation pair
+precision is 0.9843 and pair recall is 0.9106; average predicted matches are 3.202/S1.
+
+Submission 4 produced 5,603,577 matches (3.234/S1) with 6.144% empty S1s. By country:
+France 3.320 matches/S1 and 5.531% empty; India 3.151 and 6.608%; US 3.302 and 5.818%.
+`checks.py` and the organizer validator with `--check-ids` both passed on the complete files.
