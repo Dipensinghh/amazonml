@@ -270,12 +270,26 @@ BASE_FEATURES = ([f"{fl}_{tag}" for fl in NAME_FIELDS for tag, _ in NAME_SCORERS
                     "postal_agree", "postal_conflict", "postal_missing",
                     "addr_blank", "was_non_latin", "is_s3"])
 CHANNELS = ("A", "P", "B", "C")
-RETRIEVAL_FEATURES = ([f"ch_{c}" for c in CHANNELS]
-                      + ["n_channels", "retr_score", "retr_rank", "rank_frac", "cand_count",
-                         "score_gap_best", "score_ratio_best",
-                         "rev_rank", "rev_count", "rev_score_gap"])
+# Ranking/competition signals derived for any candidate file that carries retrieval evidence.
+CORE_RETRIEVAL = ["retr_score", "retr_rank", "rank_frac", "cand_count",
+                  "score_gap_best", "score_ratio_best",
+                  "rev_rank", "rev_count", "rev_score_gap"]
+# blocking.py v3 (frozen) emits tok_score / name_sim / final_rank and has no A/P/B/C channels.
+V3_EXTRA = ["retr_tok_score", "retr_name_sim", "from_blank_index"]
+# legacy channel-union schema (blocking v1/v2), kept so older parquets still work
+CHANNEL_EXTRA = [f"ch_{c}" for c in CHANNELS] + ["n_channels"]
+RETRIEVAL_FEATURES = CORE_RETRIEVAL + V3_EXTRA + CHANNEL_EXTRA
 FEATURE_NAMES = BASE_FEATURES          # retained for callers that predate the retrieval block
-PASSTHROUGH = ("s1_id", "cand_id", "label", "neg_kind")
+PASSTHROUGH = ("s1_id", "cand_id", "label", "neg_kind", "source")
+
+
+def rerank_alpha() -> float:
+    """The frozen rerank weight from blocking.py, so these features track A's config."""
+    try:
+        from blocking import FROZEN
+        return float(FROZEN["alpha"])
+    except Exception:
+        return 6.0
 
 
 def feature_columns(tbl: pa.Table) -> list:
@@ -290,21 +304,49 @@ def feature_columns(tbl: pa.Table) -> list:
 def collapse(cand: pa.Table) -> "pd.DataFrame":
     """One row per distinct (s1_id, cand_id), with retrieval/competition columns when available.
 
-    blocking.py emits a row per (pair, channel); this folds them into score = max, rank = min and
-    one flag per channel, then derives the within-S1 (how this candidate compares with the S1's
-    other candidates) and cross-S1 (how many other S1s want this same target, and how strongly)
-    signals. Those are what let the model reason about competition rather than each pair alone.
+    Three input schemas are recognised:
+
+      v3 (blocking.py, frozen)  s1_id, cand_id, source, blank_addr_index,
+                                tok_score, name_sim, final_rank
+      channel union (v1/v2)     s1_id, cand_id, channel, score, rank
+      plain                     s1_id, cand_id [, label, neg_kind]  -> dedupe only
+
+    v3 ranks by `tok_score + alpha * name_sim/100` but stores only the two parts, so the
+    composite is reconstructed with blocking's own FROZEN alpha. v3 has no A/P/B/C channels;
+    `blank_addr_index` (the name-only index used for blank-address targets) is the one
+    provenance flag it does carry.
+
+    Whatever the schema, the derived signals are the same: how this candidate compares with
+    the S1's other candidates (rank_frac, score_gap_best, score_ratio_best), and how it fares
+    against the other S1s competing for the same target (rev_rank, rev_count, rev_score_gap).
+    Since each S2/S3 id belongs to at most one S1, that competition view is what lets the model
+    reason about the contest rather than scoring each pair alone.
     """
     import pandas as pd
     df = cand.to_pandas()
-    has_retr = {"score", "rank"}.issubset(df.columns)
+    cols = set(df.columns)
     keys = ["s1_id", "cand_id"]
-    if not has_retr:
+    rank_col = next((c for c in ("final_rank", "tok_rank", "rank") if c in cols), None)
+    v3 = "tok_score" in cols
+    legacy = "channel" in cols and "score" in cols
+    if not (v3 or legacy) or rank_col is None:
         return df.drop_duplicates(keys).reset_index(drop=True)
 
-    agg = df.groupby(keys, sort=False).agg(retr_score=("score", "max"),
-                                           retr_rank=("rank", "min")).reset_index()
-    if "channel" in df.columns:
+    if v3:
+        alpha = rerank_alpha()
+        df = df.assign(_score=df["tok_score"].to_numpy(np.float32)
+                       + alpha * df["name_sim"].to_numpy(np.float32) / 100.0)
+        spec = dict(retr_score=("_score", "max"), retr_rank=(rank_col, "min"),
+                    retr_tok_score=("tok_score", "max"), retr_name_sim=("name_sim", "max"))
+        if "blank_addr_index" in cols:
+            spec["from_blank_index"] = ("blank_addr_index", "max")
+    else:
+        df = df.assign(_score=df["score"].to_numpy(np.float32))
+        spec = dict(retr_score=("_score", "max"), retr_rank=(rank_col, "min"))
+
+    agg = df.groupby(keys, sort=False).agg(**spec).reset_index()
+
+    if legacy:
         ch = df[[*keys, "channel"]].copy()
         ch["channel"] = ch["channel"].astype(str)
         ch = ch.drop_duplicates()
@@ -313,32 +355,30 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
         # each channel appears at most once per pair after the dedupe, so sum == bitwise or
         bits = ch.groupby(keys, sort=False)["_b"].sum().reset_index()
         agg = agg.merge(bits, on=keys, how="left")
-        agg["_b"] = agg["_b"].fillna(0).astype(np.int16)
-    else:
-        agg["_b"] = np.int16(0)
-    b = agg["_b"].to_numpy()          # pandas Series has no >> operator; numpy does
-    for i, c in enumerate(CHANNELS):
-        agg[f"ch_{c}"] = np.right_shift(b, i).astype(np.int16) & np.int16(1)
-        agg[f"ch_{c}"] = agg[f"ch_{c}"].astype(np.float32)
-    agg["n_channels"] = agg[[f"ch_{c}" for c in CHANNELS]].sum(axis=1).astype(np.float32)
-    agg = agg.drop(columns="_b")
+        b = agg["_b"].fillna(0).astype(np.int16).to_numpy()   # pandas Series has no >>; numpy does
+        for i, c in enumerate(CHANNELS):
+            agg[f"ch_{c}"] = (np.right_shift(b, i) & 1).astype(np.float32)
+        agg["n_channels"] = agg[[f"ch_{c}" for c in CHANNELS]].sum(axis=1).astype(np.float32)
+        agg = agg.drop(columns="_b")
 
     # within the S1's own candidate list
-    g1 = agg.groupby("s1_id")["retr_score"]
-    best = g1.transform("max")
+    best = agg.groupby("s1_id")["retr_score"].transform("max")
     agg["cand_count"] = agg.groupby("s1_id")["s1_id"].transform("size").astype(np.float32)
     agg["score_gap_best"] = (best - agg["retr_score"]).astype(np.float32)
     agg["score_ratio_best"] = np.where(best > 0, agg["retr_score"] / best, 0.0).astype(np.float32)
     agg["rank_frac"] = (agg["retr_rank"] / agg["cand_count"].clip(lower=1)).astype(np.float32)
 
-    # competition: the same target is usually reachable from several S1s, but may belong to one
+    # competition: the same target is reachable from several S1s but belongs to at most one
     gc = agg.groupby("cand_id")["retr_score"]
     agg["rev_rank"] = (gc.rank(ascending=False, method="min") - 1).astype(np.float32)
     agg["rev_count"] = agg.groupby("cand_id")["cand_id"].transform("size").astype(np.float32)
     agg["rev_score_gap"] = (gc.transform("max") - agg["retr_score"]).astype(np.float32)
 
-    agg["retr_score"] = agg["retr_score"].astype(np.float32)
-    agg["retr_rank"] = agg["retr_rank"].astype(np.float32)
+    for c in ("retr_score", "retr_rank", "retr_tok_score", "retr_name_sim", "from_blank_index"):
+        if c in agg.columns:
+            agg[c] = agg[c].astype(np.float32)
+    if "retr_name_sim" in agg.columns:
+        agg["retr_name_sim"] /= 100.0            # rapidfuzz 0-100 -> 0-1, like every other sim
 
     extra = [c for c in cand.column_names if c in ("label", "neg_kind")]
     if extra:
@@ -346,12 +386,42 @@ def collapse(cand: pa.Table) -> "pd.DataFrame":
     return agg
 
 
-def build(cand_path, split: str = "train", batch: int = 500_000) -> tuple:
+def attach_labels(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Add an int8 `label` from train_ground_truth: 1 if the pair is a true match."""
+    from blocking import gt_pairs
+    gt = gt_pairs()
+    truth = set(zip(gt["s1_id"].to_numpy(), gt["cand_id"].to_numpy()))
+    df["label"] = np.fromiter((1 if k in truth else 0
+                               for k in zip(df["s1_id"].to_numpy(), df["cand_id"].to_numpy())),
+                              np.int8, len(df))
+    return df
+
+
+def constant_columns(tbl: pa.Table) -> list:
+    """Feature columns with a single distinct value in THIS table.
+
+    Reported, never dropped. Dropping per file would give the fitting and validation parquets
+    different column sets whenever a feature is constant in one and not the other, and the
+    model would then be trained and scored on different schemas.
+    """
+    out = []
+    for c in feature_columns(tbl):
+        v = np.asarray(tbl[c], dtype=np.float32)
+        if v.size and float(v.min()) == float(v.max()):
+            out.append(c)
+    return out
+
+
+def build(cand_path, split: str = "train", batch: int = 500_000,
+          labels: bool = False) -> tuple:
     """Features for every distinct pair in the candidate parquet, batched."""
     import pandas as pd
     raw = pq.read_table(cand_path)
     with timed(f"collapse candidates ({raw.num_rows:,} rows)"):
         df = collapse(raw)
+    if labels and "label" not in df.columns:
+        with timed("attach ground-truth labels"):
+            df = attach_labels(df)
     retr = [c for c in RETRIEVAL_FEATURES if c in df.columns]
     n = len(df)
     print(f"  {n:,} distinct pairs; retrieval features: "
@@ -421,12 +491,27 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="output parquet (default: <candidates>_feats)")
     ap.add_argument("--batch", type=int, default=500_000)
     ap.add_argument("--report", action="store_true", help="print label means and throughput")
+    ap.add_argument("--labels", action="store_true",
+                    help="attach label from train_ground_truth (train split only)")
+    ap.add_argument("--head", type=int, default=0, help="smoke-test on the first N pairs only")
     args = ap.parse_args()
 
-    tbl, elapsed = build(args.candidates, args.split, args.batch)
+    src_path = args.candidates
+    if args.head:
+        sub = pq.read_table(src_path).slice(0, args.head)
+        src_path = str(ART / "_head_sample.parquet")
+        pq.write_table(sub, src_path)
+        print(f"smoke test on the first {args.head:,} rows", file=sys.stderr, flush=True)
+
+    tbl, elapsed = build(src_path, args.split, args.batch, args.labels)
     out = args.out or str(args.candidates).replace(".parquet", "_features.parquet")
     pq.write_table(tbl, out, compression="zstd")
-    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(feature_columns(tbl))} features")
+    names = feature_columns(tbl)
+    print(f"wrote {out}: {tbl.num_rows:,} rows x {len(names)} features")
+    const = constant_columns(tbl)
+    if const:
+        print(f"  constant in this file (kept, so fit/val schemas stay identical): "
+              f"{', '.join(const)}")
     if args.report:
         report(tbl, elapsed)
 
