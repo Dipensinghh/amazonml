@@ -11,6 +11,9 @@ this set is 0.9293.
 
 ### 5.1 Model lineup
 
+**Final model: v4r** (`models/r1_full`): LightGBM on forward ∪ reverse-retrieval candidates, 44 features,
+255 leaves, 1,372 trees, threshold 0.70. Validation macro F0.5 **0.9531** (US 0.9640, India 0.9369).
+
 All models are LightGBM binary classifiers scored on val50k with a single threshold tuned after global
 target ownership. v1 to v3 use the frozen blocking-v3 candidates (K = 10 per source); v4r adds
 reverse-retrieval candidates (section 5.1, last bullet). v1 to v2cq_fix and v4r are fitted on about
