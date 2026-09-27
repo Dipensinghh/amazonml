@@ -1,0 +1,29 @@
+{
+  "features_in_bundle": 44,
+  "best_iteration": 2978,
+  "full": {
+    "t": 0.7,
+    "macro_f05_with_ownership": 0.9561450945610999,
+    "macro_f05_without_ownership": 0.9561408840347841,
+    "t_without_ownership": 0.7,
+    "per_country_at_t": {
+      "India": {
+        "n_s1": 20086,
+        "macro_f05": 0.9418247947066097
+      },
+      "US": {
+        "n_s1": 29914,
+        "macro_f05": 0.9657605770401161
+      }
+    },
+    "pairs_predicted": 160461,
+    "pair_precision": 0.9859592050404771,
+    "pair_recall": 0.9141853356369793,
+    "singletons": 2702,
+    "singleton_accuracy": 0.9367135455218357,
+    "singleton_false_merges": 171,
+    "avg_cands_per_s1": 24.10334,
+    "n_scope_s1": 50000,
+    "n_pairs": 1205167
+  }
+}

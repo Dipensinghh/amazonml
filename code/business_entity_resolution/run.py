@@ -1,7 +1,8 @@
 """Reproduce the entity-resolution pipeline one stage at a time or end to end.
 
-Final model: R=1 reverse retrieval (models/r1_full). Stages, in order:
-  normalize, candidates, reverse, features, competition, apply_competition, train, report, score
+Final model: R=1 reverse retrieval trained on 600k fitting S1s (models/r1_600k), scored at
+threshold 0.78 (THRESHOLD below). Stages, in order:
+  normalize, candidates, reverse, extra, features, competition, apply_competition, train, report, score
 `all` runs them in that order.
 
 The model used for scoring is one config value, MODEL_DIR (override with --model-dir). `train`
@@ -14,13 +15,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-MODEL_DIR = "models/r1_full"  # the single place that names the scoring model
+MODEL_DIR = "models/r1_600k"  # the single place that names the scoring model
+# Final submission threshold. The bundle keeps its validation-tuned 0.70; 0.78 was chosen from two
+# public-leaderboard probes (0.62 / 0.70 / 0.78) and is the value behind the submitted file.
+THRESHOLD = 0.78
 
 ART = "artifacts"
-TRAIN_SETS = ["fit200k_r1", "val50k_r1"]  # labelled R=1 union subsets of trainall_r1 (train split)
+TRAIN_SETS = ["fit200k_r1", "fit400k_extra_r1", "val50k_r1"]  # labelled R=1 subsets of trainall_r1
 R1_TRAIN = ["--num-leaves", "255", "--n-estimators", "3000", "--learning-rate", "0.05",
             "--early-stop", "100"]  # 44 features; min_child_samples 50, reg_lambda 1 (train.PARAMS)
-STAGES = ["normalize", "candidates", "reverse", "features", "competition",
+STAGES = ["normalize", "candidates", "reverse", "extra", "features", "competition",
           "apply_competition", "train", "report", "score"]
 
 
@@ -38,6 +42,10 @@ def commands(a, root: Path) -> dict:
         "reverse": [[py, "-u", str(src / "reverse_union.py"), "--name", "trainall", "--subsets",
                      "--jobs", str(a.jobs)],
                     [py, "-u", str(src / "reverse_union.py"), "--name", "test", "--jobs", str(a.jobs)]],
+        # 400k more non-validation fitting S1s (same seed-42 recipe), R=1 rows from cand_trainall_r1
+        "extra": [[py, "-u", str(src / "fit_extra.py"), "--n", "400000",
+                   "--candidates", f"{ART}/cand_trainall_r1.parquet",
+                   "--base-fit", f"{ART}/cand_fit200k_r1.parquet", "--tag", "fit400k_extra_r1"]],
         "features": [[py, "-u", str(src / "features.py"), "--candidates", f"{ART}/cand_{n}.parquet",
                       "--split", "train", "--labels", "--batch", str(a.batch_size), "--out", feat(n)]
                      for n in TRAIN_SETS]
@@ -52,7 +60,7 @@ def commands(a, root: Path) -> dict:
                                  "--competition", f"{ART}/competition_test_r1.parquet",
                                  "--out", full("test_r1")]],
         "train": [[py, "-u", str(src / "train.py"), "--features", full("fit200k_r1"),
-                   "--extra-features", full("val50k_r1"), "--scope-sample", "50000",
+                   "--extra-features", full("fit400k_extra_r1"), full("val50k_r1"), "--scope-sample", "50000",
                    "--out-dir", md, "--n-jobs", str(a.threads), *R1_TRAIN]],
         "report": [[py, "-u", str(src / "val_report.py"), "--model", md, "--features-val", full("val50k_r1"),
                     "--cand", f"{ART}/cand_val50k_r1.parquet", "--scope-sample", "50000", "--k", "5",
@@ -60,7 +68,7 @@ def commands(a, root: Path) -> dict:
         "score": [[py, "-u", str(src / "score_test.py"), "--features", full("test_r1"),
                    "--candidates", f"{ART}/cand_test_r1.parquet", "--model", f"{md}/lgbm.txt",
                    "--bundle", f"{md}/bundle.json", "--validator", "utils/validate_submission.py",
-                   "--batch-size", str(a.batch_size)]],
+                   "--batch-size", str(a.batch_size), "--threshold", str(a.threshold)]],
     }
 
 
@@ -69,6 +77,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=[*STAGES, "all"])
     ap.add_argument("--model-dir", default=MODEL_DIR, help=f"model bundle directory (default {MODEL_DIR})")
+    ap.add_argument("--threshold", type=float, default=THRESHOLD,
+                    help=f"scoring threshold (default {THRESHOLD}, the final submission)")
     ap.add_argument("--overwrite", action="store_true", help="let `train` replace an existing bundle")
     ap.add_argument("--jobs", type=int, default=8, help="blocking / reverse-retrieval worker processes")
     ap.add_argument("--threads", type=int, default=16, help="LightGBM threads (r1_full used 16)")

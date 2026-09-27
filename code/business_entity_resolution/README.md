@@ -6,9 +6,13 @@ source in both directions (forward S1 → targets, plus reverse: each target's b
 features, scores pairs with LightGBM, applies one validation-tuned threshold with global target
 ownership (each S2/S3 record goes to at most one S1), and writes the two submission files.
 
-Shipped model: **R=1 reverse retrieval**, `models/r1_full/` (validation macro F0.5 0.9531, US 0.9640,
-India 0.9369, threshold 0.70, 1,372 trees). The scoring model is one config value, `MODEL_DIR` at the top
-of `run.py` (or `--model-dir`).
+Shipped model (final submission): **R=1 reverse retrieval trained on 600,000 fitting S1s**,
+`models/r1_600k/` (validation macro F0.5 0.9561, US 0.9658, India 0.9418, 2,978 trees), scored at
+**threshold 0.78**: public leaderboard 0.947135, output SHA-256 `078556e5…3fe78`. The bundle stores its
+validation-tuned threshold (0.70); 0.78 was chosen from two public-leaderboard probes and is set by
+`THRESHOLD` in `run.py` (override with `--threshold`). The scoring model is `MODEL_DIR` at the top of
+`run.py` (or `--model-dir`). `models/r1_full/` (the 200k-S1 R=1 model, val 0.9531, public 0.942136 at
+0.70) is kept for comparison.
 
 ## Layout
 
@@ -16,7 +20,8 @@ of `run.py` (or `--model-dir`).
 run.py                  stage runner (prints every command it runs; --dry-run to only print)
 requirements.txt        pinned dependencies
 src/                    all pipeline code (entry points listed below)
-models/r1_full/         lgbm.txt, bundle.json (ordered 44 features, threshold), threshold.json, val_report.json
+models/r1_600k/         final: lgbm.txt, bundle.json (ordered 44 features, val threshold 0.70), threshold.json, val_report.json
+models/r1_full/         200k-S1 R=1 model, same layout
 artifacts/addr_tfidf.joblib   fitted address TF-IDF shared by train and test features (see below)
 ```
 
@@ -35,7 +40,7 @@ Python used by the team: CPython 3.14.4 (Windows 11), CPython 3.14.7 (macOS), Py
 
 ## Reproduce end to end
 
-`python -u run.py all` runs the stages below in order. While `models/r1_full/bundle.json` exists,
+`python -u run.py all` runs the stages below in order. While `models/r1_600k/bundle.json` exists,
 `all` skips `train` and `report` and scores with the shipped model (see "Retraining"). Each stage can
 also be run alone, e.g. `python -u run.py reverse`. The commands `run.py` executes, from this folder:
 
@@ -70,12 +75,14 @@ python -u src/apply_competition.py --features artifacts/cand_fit200k_r1_features
 python -u src/apply_competition.py --features artifacts/cand_val50k_r1_features.parquet  --competition artifacts/competition_trainall_r1.parquet --out artifacts/cand_val50k_r1_features_fullrev.parquet
 python -u src/apply_competition.py --features artifacts/cand_test_r1_features.parquet    --competition artifacts/competition_test_r1.parquet     --out artifacts/cand_test_r1_features_fullrev.parquet
 
-# 7. train: fit200k_r1 for fitting, val50k_r1 for early stopping and the threshold
-python -u src/train.py --features artifacts/cand_fit200k_r1_features_fullrev.parquet --extra-features artifacts/cand_val50k_r1_features_fullrev.parquet --scope-sample 50000 --out-dir models/r1_full --n-jobs 16 --num-leaves 255 --n-estimators 3000 --learning-rate 0.05 --early-stop 100
-python -u src/val_report.py --model models/r1_full --features-val artifacts/cand_val50k_r1_features_fullrev.parquet --cand artifacts/cand_val50k_r1.parquet --scope-sample 50000 --k 5 --out models/r1_full/val_report.json
+# 7. train: fit200k_r1 + fit400k_extra_r1 (600k fitting S1s), val50k_r1 for early stopping.
+#    fit400k_extra_r1 comes from: python -u src/fit_extra.py --n 400000 --candidates artifacts/cand_trainall_r1.parquet --base-fit artifacts/cand_fit200k_r1.parquet --tag fit400k_extra_r1
+#    then features.py + apply_competition.py on it, exactly as for fit200k_r1 (run.py stages extra / features / apply_competition).
+python -u src/train.py --features artifacts/cand_fit200k_r1_features_fullrev.parquet --extra-features artifacts/cand_fit400k_extra_r1_features_fullrev.parquet artifacts/cand_val50k_r1_features_fullrev.parquet --scope-sample 50000 --out-dir models/r1_600k --n-jobs 16 --num-leaves 255 --n-estimators 3000 --learning-rate 0.05 --early-stop 100
+python -u src/val_report.py --model models/r1_600k --features-val artifacts/cand_val50k_r1_features_fullrev.parquet --cand artifacts/cand_val50k_r1.parquet --scope-sample 50000 --k 5 --out models/r1_600k/val_report.json
 
 # 8. score test, threshold + global ownership, write output/, run both checkers
-python -u src/score_test.py --features artifacts/cand_test_r1_features_fullrev.parquet --candidates artifacts/cand_test_r1.parquet --model models/r1_full/lgbm.txt --bundle models/r1_full/bundle.json --validator utils/validate_submission.py --batch-size 500000
+python -u src/score_test.py --features artifacts/cand_test_r1_features_fullrev.parquet --candidates artifacts/cand_test_r1.parquet --model models/r1_600k/lgbm.txt --bundle models/r1_600k/bundle.json --validator utils/validate_submission.py --batch-size 500000 --threshold 0.78
 ```
 
 **Why reverse retrieval.** Half of the forward model's misses were never retrieved (68% of those in
@@ -101,6 +108,8 @@ S2/S3 of the same country (distractors kept).
 | cand_val50k_r1 | 1,205,167 | 24.10 | 21,884 |
 | cand_test_r1 | 41,955,111 | 24.22 | 1,258,272 |
 
+r1_600k (final): 44 features, fitted on 14,456,015 pairs of 600,000 fitting S1s, best iteration 2,978
+(of a 3,000 cap); val pair precision 0.9860, recall 0.9142, singleton accuracy 0.9367.
 r1_full: 44 features, fitted on 4,819,000 pairs of 200,000 fitting S1s (13.8% positive), early
 stopping at 1,372 trees; val pair precision 0.9843, recall 0.9106.
 

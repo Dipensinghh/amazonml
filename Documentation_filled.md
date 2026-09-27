@@ -16,8 +16,9 @@ rare-token retriever proposes candidates in both directions: forward (each Sourc
 searches the S2/S3 records of its country) and reverse (each S2/S3 record adds its best S1), about
 24.2 candidates per S1 on test. LightGBM scores each pair on 44 string, retrieval and cross-S1
 competition features; one threshold plus a global "each S2/S3 record has at most one S1 owner" rule
-gives the matches. The final model (R=1, reverse retrieval) reaches **val macro F0.5 0.9531** (US
-0.9640, India 0.9369) against a candidate recall ceiling of 0.9578; its public score is pending.
+gives the matches. The final model (R=1 reverse retrieval, trained on 600k fitting S1s) reaches
+**val macro F0.5 0.9561** (US 0.9658, India 0.9418) against a candidate recall ceiling of 0.9578, and
+**0.947135 on the public leaderboard** at threshold 0.78.
 
 ---
 
@@ -128,11 +129,16 @@ chosen for production (0.9578 @ 24.10 in the production union).
   of such S1s (`rev_count`) and the score gap to the best of them (`rev_score_gap`).
 - Other: was-non-Latin and is-S3 flags. No country feature (France is unseen).
 
-**Model type:** LightGBM binary classifier. Final model R=1 (`models/r1_full`): 255 leaves, learning
-rate 0.05, up to 3,000 trees with early stopping (100 rounds) on validation log loss (stopped at
-1,372), min_child_samples 50, reg_lambda 1, seed 42. Fitted on 4,819,000 union candidate pairs of the
-200,000 seeded fitting S1s (13.8% positive); positives are candidates in the ground truth, negatives
-are all other retrieved candidates.
+**Model type:** LightGBM binary classifier. Final model R=1 600k (`models/r1_600k`): 255 leaves,
+learning rate 0.05, up to 3,000 trees with early stopping (100 rounds) on validation log loss (best
+iteration 2,978), min_child_samples 50, reg_lambda 1, seed 42. Fitted on 14,456,015 union candidate
+pairs of 600,000 seeded fitting S1s (the 200,000 of fit200k plus 400,000 drawn by `fit_extra.py` with
+the same seed-42 recipe; 13.8% positive); positives are candidates in the ground truth, negatives are
+all other retrieved candidates. Scored at threshold **0.78**: the validation-tuned threshold is 0.70,
+and two public probes of the 200k R=1 model (0.62: 0.940067, 0.70: 0.942136, 0.78: 0.943093) showed a
+consistent gain from a stricter threshold; applied to the 600k model it moved the public score from
+0.946504 to 0.947135. The 200k R=1 model (`models/r1_full`, 1,372 trees, 4,819,000 pairs) is kept for
+comparison.
 
 **Competition at the right scale.** Computed inside a sampled candidate file, `rev_*` see only that
 file's S1s (forward fit200k: negative-pair `rev_count` 13.2 inside the file). Recomputed over all 2.2M
@@ -163,10 +169,13 @@ forward ∪ reverse union (ceiling 0.9578).
 | v2cq_fix | 43, leading-zero fix | 255 / 1,503 | 200k | 0.9394 | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | |
 | v3 | 43, as v2cq_fix | 255 / 2,554 | 600k | 0.9423 | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | |
 | R=1 without rev_* | 41 | 255 / 1,378 | 200k | 0.9527 | 0.69 | 0.9634 | 0.9367 | | | |
-| **R=1** (`models/r1_full`, final) | 44 = v2cq_fix + `from_reverse` | 255 / 1,372 | 200k | **0.9531** | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | pending |
+| R=1 (`models/r1_full`) | 44 = v2cq_fix + `from_reverse` | 255 / 1,372 | 200k | 0.9531 | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | 0.942136 |
+| **R=1 600k** (`models/r1_600k`, **final**) | 44, as R=1 | 255 / 2,978 | 600k | **0.9561** | 0.70 | 0.9658 | 0.9418 | 0.9860 / 0.9142 | 0.9367 | 0.946504 @ 0.70; **0.947135 @ 0.78** |
 
-- **F_0.5 Score (macro):** **0.9531** val (R=1). Predicting no matches scores 0.054; the candidate
-  recall ceiling is 0.9578 (US 0.9777, India 0.9281).
+- **F_0.5 Score (macro):** **0.9561** val (R=1 600k); **0.947135** public at threshold 0.78. Predicting
+  no matches scores 0.054; the candidate recall ceiling is 0.9578 (US 0.9777, India 0.9281). Every
+  LightGBM model lost about 0.01 from validation to public, and the public order matched the
+  validation order.
 - **What moved the score:** supervised model over rules +0.27 on the same candidates; capacity (31 → 255
   leaves, early stopping) +0.0064; whole-population competition features +0.0044 (within-file rev_*
   added nothing: v1 0.9256 vs v1b 0.9262); leading-zero house-number fix +0.0024 (true pairs flagged as
@@ -227,7 +236,7 @@ searching in both directions (forward from each S1, reverse from each S2/S3 reco
 recall ceiling from 0.929 to 0.958 for 1.8% more candidates on validation (3.1% on test, 24.2 per S1).
 A LightGBM matcher
 with whole-population competition features, global ownership and a metric-tuned threshold turns that
-into 0.9531 val macro F0.5 (US 0.9640, India 0.9369). The main lessons: the address, not the name,
+into 0.9561 val macro F0.5 (US 0.9658, India 0.9418) and 0.947135 on the public leaderboard. The main lessons: the address, not the name,
 carries retrieval, and the biggest late gain came from retrieval (reverse search, +0.0137), not the
 model; features must be computed at the scale they are used (competition features only helped once
 computed over all S1s); and small data bugs (zero-padded house numbers) were worth as much as model
@@ -248,8 +257,9 @@ reverse retrieval.
 ### A. Code Artefacts
 
 `code/business_entity_resolution/` contains `src/` (all pipeline code), `run.py`, `README.md`,
-pinned `requirements.txt`, the final R=1 bundle (`models/r1_full/`: `lgbm.txt`, `bundle.json` with the
-ordered 44 features and threshold) and the shared address TF-IDF (`artifacts/addr_tfidf.joblib`,
+pinned `requirements.txt`, the final R=1 600k bundle (`models/r1_600k/`: `lgbm.txt`, `bundle.json` with the
+ordered 44 features and validation threshold; scoring threshold 0.78 is `THRESHOLD` in `run.py`), the
+200k R=1 bundle (`models/r1_full/`) and the shared address TF-IDF (`artifacts/addr_tfidf.joblib`,
 SHA-256 `7a9d6370acc9eb3e55625c7e8d4a55b81e91f3320a9484f27c5a9098a30249e3`). Entry point: `python -u
 run.py all` (or one stage at a time: normalize, candidates, reverse, features, competition,
 apply_competition, train, report, score); the scoring model is the single value `MODEL_DIR` in
