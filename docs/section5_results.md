@@ -11,9 +11,10 @@ this set is 0.9293.
 
 ### 5.1 Model lineup
 
-All models are LightGBM binary classifiers on the frozen blocking-v3 candidates (K = 10 per source),
-scored on val50k with a single threshold tuned after global target ownership. v1 to v2cq_fix are fitted on
-fit200k (200,000 S1s); v3 uses the v2cq_fix recipe on 600,000 fitting S1s.
+All models are LightGBM binary classifiers scored on val50k with a single threshold tuned after global
+target ownership. v1 to v3 use the frozen blocking-v3 candidates (K = 10 per source); v4r adds
+reverse-retrieval candidates (section 5.1, last bullet). v1 to v2cq_fix and v4r are fitted on about
+200,000 S1s; v3 uses the v2cq_fix recipe on 600,000 fitting S1s.
 `rev_*` = the three cross-S1 competition features (`rev_rank`, `rev_count`, `rev_score_gap`).
 
 | model | features | leaves / trees | val F0.5 | t | US | India | pair P / R | singleton acc. | public |
@@ -25,10 +26,11 @@ fit200k (200,000 S1s); v3 uses the v2cq_fix recipe on 600,000 fitting S1s.
 | v2cq | 43 (rev_* over all 2.2M train S1s) | 255 / 1661 | 0.9370 | 0.68 | 0.9529 | 0.9133 | 0.9825 / 0.8763 | 0.9130 | |
 | v2cq_fix | 43, leading-zero fix | 255 / 1503 | 0.9394 | 0.73 | 0.9561 | 0.9145 | 0.9859 / 0.8739 | 0.9393 | |
 | **v3** | 43, as v2cq_fix; 600k fit S1s | 255 / 2554 | **0.9423** | 0.66 | 0.9578 | 0.9192 | 0.9841 / 0.8844 | 0.9352 | Submission 3: _pending_ |
-| v4r | v3 + reverse-retrieval candidates | | _pending_ | | | | | | |
+| **v4r** (`models/r1_full`) | 44 = v2cq_fix + `from_reverse`; forward ∪ reverse candidates | 255 / 1372 | **0.9531** | 0.70 | 0.9640 | 0.9369 | 0.9843 / 0.9106 | 0.9301 | Submission 4: _pending_ |
 
-Predicting no matches scores 0.054 on val50k. The blocking recall ceiling is 0.9293 (US 0.9621, India
-0.8806), and every model sits below it.
+Predicting no matches scores 0.054 on val50k. The candidate recall ceiling is 0.9293 for the forward
+candidates (US 0.9621, India 0.8806) and 0.9578 with reverse retrieval (US 0.9777, India 0.9281); every
+model sits below its ceiling.
 
 **What moved the score.**
 - **Supervised model over rules: +0.27.** Same candidates, same ownership policy.
@@ -47,10 +49,22 @@ Predicting no matches scores 0.054 on val50k. The blocking recall ceiling is 0.9
   it gains mostly in recall (0.8739 → 0.8844) and in India (0.9145 → 0.9192), and needs more trees
   (early stop at 2,554 vs 1,503). The tuned threshold fell from 0.73 to 0.66, trading a little singleton
   accuracy (0.9393 → 0.9352; 175 of 2,702 singletons get a false match) for the extra recall.
+- **Reverse retrieval (v2cq_fix → v4r, both on ~200k fitting S1s): +0.0137**, the largest single gain after
+  the move to a supervised model. Forward blocking searches from each S1 into the targets; the reverse
+  pass (R = 1) searches from each target back to the S1s and adds its best S1. This lifts the candidate
+  recall ceiling from 0.9293 to 0.9578 for only 1.8% more pairs (24.10 vs 23.67 per S1; 41.96M vs 40.70M
+  on test), and the model turns most of it into matches: pair recall 0.8739 → 0.9106, India
+  0.9145 → 0.9369. One feature marks reverse-only candidates (`from_reverse`), and ranks, counts, gaps and
+  full-population rev_* are recomputed over the union. Without rev_* the same model scores 0.9527, so the
+  competition features still add a little. Singleton accuracy continues to drift down (0.9301) as more
+  candidates reach the matcher. v4r was fitted on about 200,000 S1s; combining it with v3's larger fitting
+  set is untested.
 
 **Validation vs public.** The fallback's public score matched validation (0.658 vs 0.6561); v1b lost
 about 0.01 (0.9164 vs 0.9262). Likely contributors: France (15% of test S1s, no labels, unseen in
-training) and denser competition for targets at test scale.
+training) and denser competition for targets at test scale. On test, v4r predicts 3.23 matches per S1
+with 6.14% of S1s empty; France alone gets 3.32 matches per S1 with 5.53% empty, close to the training
+rates (3.46 matches, 5.6% singletons), which suggests the model is not collapsing on the unseen country.
 
 ### 5.2 Other experiments
 
@@ -170,9 +184,9 @@ to that fix. Of 173,059 true pairs, 24,194 are missed; of 151,394 predicted pair
 ### 5.6 Follow-up on the error analysis
 
 1. **Zero-padded house numbers — fixed** (v2cq → v2cq_fix, +0.0024; section 5.1).
-2. **Retrieval, mostly India — the largest remaining gap.** Half of all misses were never retrieved, and
-   68% of those are India. A reverse-retrieval line (v4r: searching from targets back to S1s) raises the
-   candidate recall ceiling from 0.929 to 0.958 in validation; its model result is pending.
+2. **Retrieval, mostly India — addressed by reverse retrieval.** Half of all misses were never retrieved,
+   and 68% of those were India. v4r raises the candidate ceiling from 0.929 to 0.958 (India 0.881 → 0.928)
+   and val F0.5 from 0.9394 to 0.9531.
 3. **Blank-address pairs.** Only 22.8% of true pairs with a blank candidate address are recalled.
    Cross-source corroboration was aimed partly at these and gave +0.0019 (section 5.2).
 4. **Twins.** Most false merges are same-name records at a neighbouring house number; a numeric-distance
@@ -185,4 +199,5 @@ to that fix. Of 173,059 true pairs, 24,194 are missed; of 151,394 predicted pair
 - Validation has 50,000 S1s competing for targets against 1.73M at test, so ownership is tested far less
   than it will be used.
 - France is unlabelled; only coverage and score distributions can be checked there.
-- The recall ceiling from blocking (0.9293; India 0.8806) bounds every result above.
+- The candidate recall ceiling bounds every result: 0.9293 for forward candidates, 0.9578 with reverse
+  retrieval (India 0.9281). Error analysis (5.3 to 5.5) was run on v2q, before reverse retrieval.
